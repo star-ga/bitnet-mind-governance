@@ -1,0 +1,9 @@
+// ternary.mind — Ternary weight types for 1-bit / 1.58-bit models
+[protection]
+module ternary {
+    pub enum TernaryWeight {
+        MinusOne = -1,
+        Zero = 0,
+        PlusOne = 1,
+    }
+}

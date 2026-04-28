@@ -1,0 +1,22 @@
+# Compiled artifacts
+*.elf
+*.o
+*.so
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Experiment outputs
+results/
+*.json.tmp

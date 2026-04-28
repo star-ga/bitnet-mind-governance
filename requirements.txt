@@ -1,0 +1,6 @@
+# Cross-architecture determinism harness dependencies
+# (no LLM inference deps required for the harness itself —
+#  those go in the per-experiment requirements)
+
+# stdlib only for the harness
+# python >= 3.10
