@@ -1,0 +1,132 @@
+// tensor_parallel_attention.mind — proposed TP attention shard.
+//
+// STATUS: research direction, NOT compilable under mindc 0.2.5.
+//
+// The `mind.distributed.*` modules below do not exist yet. This file
+// is a specification for the methods contribution of the proposed
+// paper "Compile-time governance for ternary-weight LLMs". See
+// docs/parallel_pipeline.md for the full discussion.
+//
+// What this skeleton demonstrates:
+//
+//   - Shape of `[invariant deterministic_all_reduce]` annotations
+//   - Lexicographic gather order as a compile-time-fixed property
+//   - Sharding pattern compatible with bit-identical replay
+//
+// Apache 2.0 — STARGA Inc. (skeleton for collaboration)
+
+[protection]
+module attention_tp_shard {
+    use mind.core.hash
+    use mind.tensor.q16_16
+
+    // Proposed primitives (NOT in mindc 0.2.5):
+    use mind.distributed.shard
+    use mind.distributed.allgather
+
+    // BitNet b1.58 700M topology — see src/bitnet.mind for full constants
+    const HIDDEN:           u32 = 1536u32
+    const NUM_HEADS:        u32 = 24u32
+    const HEAD_DIM:         u32 = 64u32
+
+    // World: 3 shards across 3 devices.
+    const NUM_SHARDS:        u32 = 3u32
+    const HEADS_PER_SHARD:   u32 = NUM_HEADS / NUM_SHARDS  // = 8
+
+    type TernaryMatrix {
+        rows:   u32,
+        cols:   u32,
+        packed: bytes,
+        scale:  q16_16,
+    }
+
+    // Local Q/K/V projection: each shard owns its own slice of the
+    // projection weights. Inputs are replicated across all shards.
+    fn local_qkv_projection(
+        x:         &[q16_16],
+        w_q_local: &TernaryMatrix,    // shape [HEADS_PER_SHARD * HEAD_DIM, HIDDEN]
+        w_k_local: &TernaryMatrix,
+        w_v_local: &TernaryMatrix,
+    ) -> (Vec<q16_16>, Vec<q16_16>, Vec<q16_16>) {
+        let q = ternary_matmul(w_q_local, x)
+        let k = ternary_matmul(w_k_local, x)
+        let v = ternary_matmul(w_v_local, x)
+        (q, k, v)
+    }
+
+    // Local attention over the heads owned by this shard.
+    // Lexicographic head iteration order is enforced by
+    // [invariant reduction_order_lexicographic] inherited from
+    // src/bitnet.mind matmul.
+    fn local_attention(
+        q_local: &[q16_16],
+        k_local: &[q16_16],
+        v_local: &[q16_16],
+    ) -> Vec<q16_16> {
+        // ... per-head softmax + V multiplication, integer-only via
+        // Q16.16 lookup table for exp(). See bitnet.mind for the
+        // softmax_q1616 implementation.
+        //
+        // Output: HEADS_PER_SHARD * HEAD_DIM Q16.16 values
+        unimplemented!()
+    }
+
+    // Cross-shard gather. Each shard contributes its head outputs
+    // in a fixed lexicographic order over shard_id.
+    //
+    // [invariant gather_order_lexicographic]: mindc refuses to emit
+    // any path where head outputs are concatenated in arrival-order
+    // rather than shard-id-order. This is the determinism contract.
+    [invariant gather_order_lexicographic]
+    fn allgather_lexicographic(local_heads: &[q16_16]) -> Vec<q16_16> {
+        // Proposed primitive:
+        // mind.distributed.allgather::lexicographic(local_heads, NUM_SHARDS)
+        //
+        // For paper-grade prototype:
+        //   - Direct CUDA peer-to-peer copy (not NCCL)
+        //   - OR shared-memory IPC across processes
+        //
+        // Output ordering is shard 0 contributions, then shard 1,
+        // then shard 2, etc. — never interleaved by arrival.
+        unimplemented!()
+    }
+
+    // Output projection — full weight matrix, applied to gathered
+    // multi-shard head output.
+    fn output_projection(
+        gathered: &[q16_16],          // length NUM_HEADS * HEAD_DIM
+        w_o:      &TernaryMatrix,     // shape [HIDDEN, NUM_HEADS * HEAD_DIM]
+    ) -> Vec<q16_16> {
+        ternary_matmul(w_o, gathered)
+    }
+
+    // The full TP attention block, sharded.
+    [invariant deterministic_all_reduce]
+    fn attention_shard(
+        shard_id:  u32,
+        x:         &[q16_16],
+        w_q_local: &TernaryMatrix,
+        w_k_local: &TernaryMatrix,
+        w_v_local: &TernaryMatrix,
+        w_o:       &TernaryMatrix,
+    ) -> Vec<q16_16> {
+        // 1. Local Q/K/V projection
+        let (q, k, v) = local_qkv_projection(x, w_q_local, w_k_local, w_v_local)
+
+        // 2. Local attention over this shard's heads
+        let heads_local = local_attention(&q, &k, &v)
+
+        // 3. Cross-shard gather (deterministic order)
+        let heads_full = allgather_lexicographic(&heads_local)
+
+        // 4. Output projection on the full gathered hidden state
+        output_projection(&heads_full, w_o)
+    }
+}
+
+// --- External symbol declarations (resolved by mindc linker once
+//     mind.distributed.* lands). For the proof-of-concept these
+//     can be implemented as direct CUDA peer-to-peer copies between
+//     ranks or shared-memory IPC primitives.
+
+extern fn ternary_matmul(w: &TernaryMatrix, x: &[q16_16]) -> Vec<q16_16>

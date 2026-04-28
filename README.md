@@ -67,20 +67,42 @@ access.
 
 ```
 bitnet-mind-governance/
-├── README.md               (this file)
-├── LICENSE                 (Apache 2.0)
-├── METHODOLOGY.md          (governance overhead measurement protocol)
-├── src/
-│   ├── bitnet.mind         (700M BitNet forward pass, pure MIND)
-│   ├── bitlinear.mind      (Q16.16 BitLinear projection)
-│   └── ternary.mind        (ternary weight arithmetic primitives)
+├── README.md                  (this file)
+├── LICENSE                    (Apache 2.0)
+├── METHODOLOGY.md             (governance overhead measurement protocol)
+├── src/                       (compilable under mindc 0.2.5)
+│   ├── bitnet.mind            (700M BitNet forward pass, pure MIND)
+│   ├── bitlinear.mind         (Q16.16 BitLinear projection)
+│   └── ternary.mind           (ternary weight arithmetic primitives)
+├── examples/                  (research-direction skeletons, not yet compilable)
+│   ├── README.md              (what each skeleton demonstrates)
+│   ├── tensor_parallel_attention.mind  (TP attention shard)
+│   └── pipeline_parallel_forward.mind  (PP 3-stage forward)
 ├── tests/
-│   └── test_determinism.py (cross-architecture hash-parity harness)
+│   └── test_determinism.py    (cross-architecture hash-parity harness)
 ├── docs/
-│   ├── paper_concept.md    (paper outline and methodology)
-│   └── citing.md           (BibTeX for citing this work)
+│   ├── paper_concept.md       (paper outline and methodology)
+│   ├── parallel_pipeline.md   (TP+PP research direction, paper H4)
+│   └── citing.md              (BibTeX for citing this work)
 └── requirements.txt
 ```
+
+## Distributed execution (research direction)
+
+Production deployment of 70B+ class transformers requires tensor and
+pipeline parallelism (TP+PP) to fit weights across multiple GPUs. The
+existing TP+PP solutions (vLLM, DeepSpeed, NVIDIA Triton) solve memory
+but do not produce deterministic outputs across shards because of
+floating-point reduction-order non-determinism.
+
+The `examples/` directory contains research-direction skeletons for a
+deterministic TP+PP plan emitted by `mindc`, where ternary × Q16.16
+arithmetic plus compile-time-fixed reduction order produces bit-identical
+replay across shards. See `docs/parallel_pipeline.md` for the full
+discussion and engineering scope.
+
+This is the proposed extension that turns the paper from measurement-only
+into measurement + methods.
 
 ## Status
 

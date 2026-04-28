@@ -1,0 +1,120 @@
+// pipeline_parallel_forward.mind — proposed PP forward pass.
+//
+// STATUS: research direction, NOT compilable under mindc 0.2.5.
+//
+// The `mind.distributed.pipeline` module and `[pipeline_stage(N)]`
+// attribute do not exist yet. This file is a specification for the
+// methods contribution of the proposed paper. See
+// docs/parallel_pipeline.md for context.
+//
+// What this skeleton demonstrates:
+//
+//   - Stage-boundary evidence emission
+//   - Compile-time-enforced evidence chain continuity
+//   - Pipeline that produces a merkle root over all stage transitions
+//
+// Apache 2.0 — STARGA Inc. (skeleton for collaboration)
+
+[protection]
+module pipeline_forward {
+    use mind.core.hash
+    use mind.tensor.q16_16
+    use evidence_emitter
+
+    // Proposed primitives (NOT in mindc 0.2.5):
+    use mind.distributed.pipeline
+
+    // BitNet b1.58 700M topology
+    const NUM_LAYERS:        u32 = 24u32
+    const NUM_STAGES:        u32 = 3u32
+    const LAYERS_PER_STAGE:  u32 = NUM_LAYERS / NUM_STAGES  // = 8
+
+    // Stage 0: input embedding + first 8 transformer blocks.
+    [pipeline_stage(0)]
+    [invariant evidence_chain_continuous]
+    fn stage0(input_ids: &[u32]) -> Vec<q16_16> {
+        // 1. Token embedding lookup
+        let mut h: Vec<q16_16> = embed_tokens(input_ids)
+
+        // 2. Layers 0..8
+        let mut layer: u32 = 0u32
+        while layer < LAYERS_PER_STAGE {
+            h = transformer_block(layer, &h)
+            // Compile-time required: emit evidence at every layer boundary
+            evidence_emit("layer_boundary", layer, hash::sha256(&h))
+            layer += 1u32
+        }
+
+        // 3. Stage boundary: emit hash of stage output
+        evidence_emit("stage_boundary", 0u32, hash::sha256(&h))
+        h
+    }
+
+    // Stage 1: middle 8 transformer blocks.
+    // [invariant evidence_chain_continuous] forces this stage to
+    // verify the previous stage's evidence emit before processing.
+    [pipeline_stage(1)]
+    [invariant evidence_chain_continuous]
+    fn stage1(h_in: &[q16_16]) -> Vec<q16_16> {
+        // Compile-time required: verify evidence chain from stage 0
+        verify_evidence_received("stage_boundary", 0u32, hash::sha256(h_in))
+
+        let mut h = h_in.clone()
+        let mut layer: u32 = LAYERS_PER_STAGE  // = 8
+        while layer < 2u32 * LAYERS_PER_STAGE {
+            h = transformer_block(layer, &h)
+            evidence_emit("layer_boundary", layer, hash::sha256(&h))
+            layer += 1u32
+        }
+
+        evidence_emit("stage_boundary", 1u32, hash::sha256(&h))
+        h
+    }
+
+    // Stage 2: last 8 transformer blocks + output projection.
+    [pipeline_stage(2)]
+    [invariant evidence_chain_continuous]
+    fn stage2(h_in: &[q16_16]) -> Vec<q16_16> {
+        verify_evidence_received("stage_boundary", 1u32, hash::sha256(h_in))
+
+        let mut h = h_in.clone()
+        let mut layer: u32 = 2u32 * LAYERS_PER_STAGE  // = 16
+        while layer < NUM_LAYERS {
+            h = transformer_block(layer, &h)
+            evidence_emit("layer_boundary", layer, hash::sha256(&h))
+            layer += 1u32
+        }
+
+        // Output projection to vocabulary logits
+        let logits = output_projection(&h)
+        evidence_emit("stage_boundary", 2u32, hash::sha256(&logits))
+        logits
+    }
+
+    // Top-level pipeline driver. Orchestrates the three stages and
+    // emits a final merkle root over all stage transitions — this
+    // is the per-inference attestation.
+    [invariant evidence_chain_continuous]
+    fn forward_pipeline(input_ids: &[u32]) -> (Vec<q16_16>, hash::Hash256) {
+        // Stage 0 runs on device 0
+        let h0 = pipeline::run_on_device(0u32, || stage0(input_ids))
+
+        // Stage 1 runs on device 1, receives h0 over network/IPC
+        let h1 = pipeline::run_on_device(1u32, || stage1(&h0))
+
+        // Stage 2 runs on device 2, receives h1
+        let logits = pipeline::run_on_device(2u32, || stage2(&h1))
+
+        // Compute merkle root over all evidence emits as the
+        // per-inference attestation
+        let attestation = evidence_emitter::compute_merkle_root()
+
+        (logits, attestation)
+    }
+}
+
+// --- External symbol declarations
+extern fn embed_tokens(ids: &[u32]) -> Vec<q16_16>
+extern fn transformer_block(layer: u32, h: &[q16_16]) -> Vec<q16_16>
+extern fn output_projection(h: &[q16_16]) -> Vec<q16_16>
+extern fn verify_evidence_received(tag: str, stage: u32, hash: hash::Hash256)
