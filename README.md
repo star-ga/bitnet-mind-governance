@@ -59,7 +59,9 @@ python test_determinism.py
 
 If `mindc` is not installed locally, the harness will simulate the build
 phase and verify the harness logic only. Real cross-arch validation requires
-`mindc` and target-architecture access.
+`mindc >= 0.2.4` (the first release with BitNet support; `0.2.5`
+recommended for the stable `mic@1` IR contract) and target-architecture
+access.
 
 ## Repository structure
 
@@ -86,6 +88,9 @@ bitnet-mind-governance/
 - Cross-architecture determinism harness: **scaffolded**, validation pending
   on actual cross-arch run
 - Governance overhead measurement: **methodology drafted**, measurement TBD
+- Toolchain: **tested against `mindc 0.2.5`** (current release; native
+  BitNet support landed in `0.2.4`, Pratt parser + stable `mic@1` IR
+  contract added in `0.2.5`, STARGA toolchain)
 
 This is research-stage code intended for academic collaboration. The MIND
 compiler (`mindc`) is STARGA-internal; binaries are reproducible with

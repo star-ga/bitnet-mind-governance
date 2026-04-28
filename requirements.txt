@@ -4,3 +4,8 @@
 
 # stdlib only for the harness
 # python >= 3.10
+
+# External tooling (not pip-installable; STARGA toolchain):
+#   mindc >= 0.2.4   (minimum — first release with BitNet support)
+#   mindc >= 0.2.5   (recommended — adds Pratt parser + stable mic@1 IR
+#                    for reproducible AOT deployment; current release)
