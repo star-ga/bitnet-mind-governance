@@ -1,0 +1,23 @@
+{
+  "_aggregated_for_phase_a": {
+    "cyclic_edges": 0,
+    "intra_package_edges": 0,
+    "longest_path": 1,
+    "max_mcp_tool_overlap": 0,
+    "module_count": 4,
+    "pure_modules": 4,
+    "redundancy_excess": 136,
+    "sum_abs_symbol_diffs": 138,
+    "sum_decision_points": 16,
+    "sum_evidence_calls": 0,
+    "sum_protected_decls": 29,
+    "sum_symbols": 29,
+    "total_edges": 0,
+    "total_mcp_tools": 0
+  },
+  "_comment": "Produced by `arch-mind sidecar-scan` from canonical-AST JSON. v0.0.4 / Phase D.",
+  "_languages": "python,mind",
+  "_repo_root": "/home/n/bitnet-mind-governance",
+  "edges": [],
+  "nodes": []
+}

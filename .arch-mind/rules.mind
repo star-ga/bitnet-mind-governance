@@ -1,0 +1,47 @@
+// bitnet-mind-governance architectural-governance rules
+//
+// Enforced via:
+//   arch-mind check-rules --repo . --fixture .arch-mind/last_summary.json \
+//                         --rules .arch-mind/rules.mind --mode enforce
+//
+// Small governance shim (4 modules). Pins the current near-perfect
+// state.
+//
+// Copyright 2026 STARGA, Inc. — Apache-2.0.
+
+[protection]
+module bitnet_governance_rules {
+
+    [arch_rule(acyclicity_q16, eq)]
+    const NO_CYCLES: i32 = 10000
+
+    [arch_rule(modularity_q16, eq)]
+    const NO_CROSS_PKG: i32 = 10000
+
+    [arch_rule(mcp_tool_isolation, eq)]
+    const MCP_ISOLATION: i32 = 10000
+
+    [arch_rule(depth_q16, eq)]
+    const DEPTH_OK: i32 = 10000
+
+    // Currently 9724.
+    [arch_rule(redundancy_q16, ge)]
+    const REDUNDANCY_FLOOR: i32 = 9500
+
+    // Currently 10000 (4/4 pure).
+    [arch_rule(q16_determinism_purity, ge)]
+    const PURITY_FLOOR: i32 = 9500
+
+    // Currently 8695 (20/23 protected).
+    [arch_rule(governance_kernel_coverage, ge)]
+    const GOVERNANCE_FLOOR: i32 = 8500
+
+    // Currently 3152 — small repo, distribution is sparse. Floor
+    // catches a sudden bundling change.
+    [arch_rule(equality_q16, ge)]
+    const EQUALITY_FLOOR: i32 = 2500
+
+    // Currently 0. Wire when bitnet emits decision events.
+    [arch_rule(evidence_chain_density, ge)]
+    const EVIDENCE_FLOOR: i32 = 0
+}
