@@ -82,6 +82,18 @@ substrates may be the natural fit for high-stakes regulated AI.
    higher-precision floating-point ones, even if the floating-point models
    are larger
 
+## Calibrated confidence as a sidecar (future-AI gap #3)
+
+A ternary-weight forward pass produces per-token logits and, separately, a
+calibrated confidence/utility score for each token. That score is
+**stochastic**, so the determinism harness treats it as a **sidecar
+annotation: never a kernel operand, and excluded from the SHA-256 evidence
+chain / byte-identity check**. The cross-arch bit-identity claim is anchored
+only on the deterministic Q16.16 logit bytes; the confidence score may differ
+in how a consumer uses it without ever perturbing the hash. This keeps the
+governance-overhead measurement clean — the confidence layer adds annotation
+cost, not determinism cost, and the paper can report the two separately.
+
 ## What needs to happen to write this paper
 
 | Item | Owner | Status |
