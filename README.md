@@ -71,9 +71,11 @@ root as above):
 
 Requirements: Linux (x86_64 or aarch64), Python 3.12 or newer, a C toolchain
 (`cc`, `ld`, `as`, `objcopy`; `build-essential` on Debian/Ubuntu), and
-`mindc` 0.10.x. On aarch64 the published `mindc` also calls `mlir-opt`,
-`mlir-translate` and `clang` (Ubuntu 24.04: `mlir-18-tools llvm-18 clang-18`,
-with `/usr/lib/llvm-18/bin` on `PATH`).
+`mindc` 0.10.x. On both x86_64 and aarch64 the published `mindc` also calls
+`mlir-opt`, `mlir-translate` and `clang` when it builds the cdylib (the
+`std.sha256` substrate module is compiled through the MLIR pipeline; Ubuntu
+24.04: `mlir-18-tools llvm-18 clang-18`, with `/usr/lib/llvm-18/bin` on
+`PATH`, or set `MLIR_OPT`, `MLIR_TRANSLATE` and `CLANG` to the tool paths).
 
 ```bash
 git clone https://github.com/star-ga/bitnet-mind-governance
