@@ -1,6 +1,6 @@
 // pipeline_parallel_forward.mind — proposed PP forward pass.
 //
-// STATUS: research direction, NOT compilable under mindc 0.2.5.
+// STATUS: research direction, NOT compilable under current mindc (0.10.x).
 //
 // The `mind.distributed.pipeline` module and `[pipeline_stage(N)]`
 // attribute do not exist yet. This file is a specification for the
@@ -15,16 +15,15 @@
 //
 // Apache 2.0 — STARGA Inc. (skeleton for collaboration)
 
-[protection]
 module pipeline_forward {
     use mind.core.hash
     use mind.tensor.q16_16
     use evidence_emitter
 
-    // Proposed primitives (NOT in mindc 0.2.5):
+    // Proposed primitives (NOT in mindc 0.10.x):
     use mind.distributed.pipeline
 
-    // BitNet b1.58 700M topology
+    // Proposed full-size topology (src/bitnet.mind runs a small one)
     const NUM_LAYERS:        u32 = 24u32
     const NUM_STAGES:        u32 = 3u32
     const LAYERS_PER_STAGE:  u32 = NUM_LAYERS / NUM_STAGES  // = 8

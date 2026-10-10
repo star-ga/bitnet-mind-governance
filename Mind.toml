@@ -1,0 +1,10 @@
+[package]
+name = "bitnet_mind_governance"
+version = "0.2.0"
+authors = ["STARGA Inc."]
+license = "Apache-2.0"
+description = "Ternary x Q16.16 BitNet-style forward pass in pure MIND with a SHA-256 evidence chain"
+
+[build]
+target = "cpu"
+entry = "src/bitnet.mind"

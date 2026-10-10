@@ -1,8 +1,9 @@
 # Examples
 
-This directory holds **research-direction skeletons** for distributed
-execution patterns proposed for the methods paper. They are not
-compilable under mindc 0.2.5.
+This directory holds one compiler-checked governance example and two
+**research-direction skeletons** for distributed execution patterns proposed
+for the methods paper. The skeletons are not compilable under current mindc
+(0.10.x).
 
 See `docs/parallel_pipeline.md` for the full discussion of why these
 patterns matter and what's required to land them.
@@ -11,6 +12,7 @@ patterns matter and what's required to land them.
 
 | File                              | What it shows                                                          |
 |-----------------------------------|------------------------------------------------------------------------|
+| `governance/rng_in_kernel.mind`   | A `#[deterministic]` kernel that draws from a PRNG; mindc must refuse it |
 | `tensor_parallel_attention.mind`  | TP attention shard with lexicographic-order all-gather                 |
 | `pipeline_parallel_forward.mind`  | PP 3-stage forward with compile-time evidence-chain continuity         |
 
@@ -18,8 +20,8 @@ patterns matter and what's required to land them.
 
 | Compilable | File                                  |
 |------------|---------------------------------------|
-| Yes        | `src/bitnet.mind`                     |
-| Yes        | `src/bitlinear.mind`, `src/ternary.mind` |
+| Yes (built and run by `tools/determinism.py`) | `src/bitnet.mind` |
+| Refused by design (governance negative control) | `examples/governance/rng_in_kernel.mind` |
 | No (research direction) | `examples/tensor_parallel_attention.mind` |
 | No (research direction) | `examples/pipeline_parallel_forward.mind` |
 

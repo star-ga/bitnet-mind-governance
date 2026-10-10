@@ -1,6 +1,6 @@
 // tensor_parallel_attention.mind — proposed TP attention shard.
 //
-// STATUS: research direction, NOT compilable under mindc 0.2.5.
+// STATUS: research direction, NOT compilable under current mindc (0.10.x).
 //
 // The `mind.distributed.*` modules below do not exist yet. This file
 // is a specification for the methods contribution of the proposed
@@ -15,16 +15,15 @@
 //
 // Apache 2.0 — STARGA Inc. (skeleton for collaboration)
 
-[protection]
 module attention_tp_shard {
     use mind.core.hash
     use mind.tensor.q16_16
 
-    // Proposed primitives (NOT in mindc 0.2.5):
+    // Proposed primitives (NOT in mindc 0.10.x):
     use mind.distributed.shard
     use mind.distributed.allgather
 
-    // BitNet b1.58 700M topology — see src/bitnet.mind for full constants
+    // Proposed full-size topology (src/bitnet.mind runs a small one)
     const HIDDEN:           u32 = 1536u32
     const NUM_HEADS:        u32 = 24u32
     const HEAD_DIM:         u32 = 64u32
@@ -55,17 +54,17 @@ module attention_tp_shard {
     }
 
     // Local attention over the heads owned by this shard.
-    // Lexicographic head iteration order is enforced by
-    // [invariant reduction_order_lexicographic] inherited from
-    // src/bitnet.mind matmul.
+    // Lexicographic head iteration order would be enforced by a proposed
+    // [invariant reduction_order_lexicographic]; today src/bitnet.mind fixes
+    // the order in source and no compiler check enforces it.
     fn local_attention(
         q_local: &[q16_16],
         k_local: &[q16_16],
         v_local: &[q16_16],
     ) -> Vec<q16_16> {
         // ... per-head softmax + V multiplication, integer-only via
-        // Q16.16 lookup table for exp(). See bitnet.mind for the
-        // softmax_q1616 implementation.
+        // a Q16.16 lookup table for exp() (proposed; src/bitnet.mind has
+        // no softmax because it runs single positions).
         //
         // Output: HEADS_PER_SHARD * HEAD_DIM Q16.16 values
         unimplemented!()

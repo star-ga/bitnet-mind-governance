@@ -1,11 +1,11 @@
 # Pipeline & Tensor Parallelism in MIND — Research Direction
 
-## What's true today (mindc 0.2.5)
+## What's true today (mindc 0.10.x)
 
-`mindc` compiles to **single-device** targets (CPU, single GPU, Pi/edge). It
-does not yet emit multi-device tensor-parallel (TP) or pipeline-parallel (PP)
-plans as built-in primitives. There is no NCCL binding, no all-reduce, no
-distributed scheduler in the compiler today.
+The open-source `mindc` compiles **single-device** programs. It does not
+emit multi-device tensor-parallel (TP) or pipeline-parallel (PP) plans, and
+the language has no all-reduce, all-gather or distributed scheduler
+primitives today.
 
 This is an honest gap. **It is also the paper-shaped problem.**
 
@@ -31,7 +31,7 @@ weights solves both:
 ## Architecture (research scope — not implemented)
 
 The skeleton below is what the `.mind` source for a deterministic TP+PP
-plan could look like. **It does not compile under mindc 0.2.5.** It is a
+plan could look like. **It does not compile under current mindc (0.10.x).** It is a
 specification for the methods contribution of the proposed paper.
 
 ### Tensor-parallel attention head shard
@@ -41,8 +41,8 @@ specification for the methods contribution of the proposed paper.
 [invariant reduction_order_lexicographic]
 module attention_tp_shard {
     use mind.tensor.q16_16
-    use mind.distributed.shard      // proposed: not in 0.2.5
-    use mind.distributed.allreduce  // proposed: not in 0.2.5
+    use mind.distributed.shard      // proposed: not in 0.10.x
+    use mind.distributed.allreduce  // proposed: not in 0.10.x
 
     // World: 3 shards across 3 devices.
     // Shard k owns heads [k * HEADS_PER_SHARD : (k+1) * HEADS_PER_SHARD].
@@ -79,8 +79,9 @@ module attention_tp_shard {
 **Key invariants enforced by `mindc` (proposed):**
 - `deterministic_all_reduce`: refuses to emit if any reduction across
   shards uses non-lexicographic order
-- `reduction_order_lexicographic`: applies to local matmuls (already
-  enforced in 0.2.5) and extends to cross-device gathers
+- `reduction_order_lexicographic`: applies to local matmuls and extends
+  to cross-device gathers (today `src/bitnet.mind` fixes the local order
+  in source; no compiler check enforces it)
 - `gather_order_lexicographic`: shard contributions concatenated in
   fixed shard-id order, never timestamp-arrival order
 
@@ -89,7 +90,7 @@ module attention_tp_shard {
 ```mind
 [invariant evidence_chain_continuous]
 module pipeline_forward {
-    use mind.distributed.pipeline    // proposed: not in 0.2.5
+    use mind.distributed.pipeline    // proposed: not in 0.10.x
     use evidence_emitter
 
     // Stages: 24 transformer layers split into 3 stages of 8 layers each.

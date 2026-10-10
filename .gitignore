@@ -1,13 +1,16 @@
-# Compiled artifacts
-*.elf
-*.o
+# MIND build outputs
+target/
+.mind-build.lock
+*.mic3
 *.so
+*.o
+*.elf
 
 # Python
 __pycache__/
 *.pyc
-*.pyo
 .pytest_cache/
+.ruff_cache/
 .venv/
 venv/
 
@@ -17,6 +20,8 @@ venv/
 *.swp
 .DS_Store
 
-# Experiment outputs
-results/
-*.json.tmp
+# Local harness reports and a locally unpacked compiler
+# (results/expected.json is tracked)
+report*.json
+.mindc/
+mindc-linux-*.tar.gz*

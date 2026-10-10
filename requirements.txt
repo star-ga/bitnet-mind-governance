@@ -1,11 +1,9 @@
-# Cross-architecture determinism harness dependencies
-# (no LLM inference deps required for the harness itself —
-#  those go in the per-experiment requirements)
+# Python tooling for the determinism harness and its tests.
+# The harness and the reference oracle themselves use only the standard
+# library (Python >= 3.12).
+pytest==9.1.1
+ruff==0.17.0
 
-# stdlib only for the harness
-# python >= 3.10
-
-# External tooling (not pip-installable; STARGA toolchain):
-#   mindc >= 0.2.4   (minimum — first release with BitNet support)
-#   mindc >= 0.2.5   (recommended — adds Pratt parser + stable mic@1 IR
-#                    for reproducible AOT deployment; current release)
+# The MIND compiler is not pip-installable. Use mindc 0.10.x: the public
+# release archives at https://github.com/star-ga/mind/releases (v0.10.2 is
+# what CI pins), or a build from source. See README.md, "Quick start".

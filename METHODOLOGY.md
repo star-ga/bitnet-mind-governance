@@ -30,8 +30,8 @@ replay. Bare BitNet on FP16 substrates does not.
 
 ### Substrate
 
-- **Model**: BitNet b1.58 2B4T (Microsoft, Apache 2.0)
-  - 2.4B parameters, ternary weights `{-1, 0, +1}`, 4-bit activations
+- **Model**: BitNet b1.58 2B4T (Microsoft, MIT license)
+  - ~2B parameters, ternary weights `{-1, 0, +1}`, 8-bit activations (W1.58A8)
   - HuggingFace: `microsoft/bitnet-b1.58-2B-4T`
 
 ### Hardware targets
@@ -90,8 +90,9 @@ For each configuration and hardware target, run:
 - Fixed seed: `0xdeadbeefc0ffee` for all runs
 - 100 reproductions per (config × hardware × workload) cell
 - All raw measurements stored as JSON with hashes for verification
-- Cross-architecture harness in `tests/test_determinism.py` validates
-  hash-parity claim
+- Cross-architecture harness in `tools/determinism.py` (run by
+  `tests/test_determinism.py` and CI) validates the hash-parity claim on
+  the reference program
 
 ## Statistical analysis
 
@@ -107,7 +108,7 @@ For each configuration and hardware target, run:
 | HuggingFace BitNet implementation may have framework overhead | Compare to a hand-rolled reference if discrepancy > 2% |
 | Runtime guardrails not optimized for BitNet | Use multiple runtime systems (NeMo + Guardrails AI), report worst-case to be fair |
 | Energy meter accuracy varies across hardware | Report all three (NVML, RAPL, external) where available |
-| `mindc` compiler is STARGA-internal, not open-source | Pre-built binaries shipped with checksums for reproducibility audit |
+| Results could differ between `mindc` releases | Pin the compiler release archive by sha256 (CI pins v0.10.2) and record the version in every report |
 | Determinism claim depends on Q16.16 precision | Document precision budget, verify against reference HF output |
 
 ## Expected outcomes
@@ -132,7 +133,7 @@ To be negotiated. Suggested split:
 
 ## Target venues
 
-- MLSys 2026 (deadline ~October)
+- MLSys
 - NeurIPS Workshop on Efficient ML
 - USENIX OSDI
 - Workshop on Trustworthy ML

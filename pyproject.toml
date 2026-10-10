@@ -1,0 +1,16 @@
+[project]
+name = "bitnet-mind-governance"
+version = "0.2.0"
+description = "Determinism harness and Python reference for a ternary x Q16.16 forward pass in MIND"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

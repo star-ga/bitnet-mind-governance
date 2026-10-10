@@ -1,133 +1,180 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="bitnet-mind-governance logo" width="96" height="96">
+</p>
+
 # BitNet + MIND Governance
 
-A reference implementation and measurement harness for compile-time governance
-on ternary-weight LLMs.
+A small, runnable reference for **deterministic ternary-weight inference with
+compile-time governance**, written in [MIND](https://mindlang.dev), plus the
+harness that checks it bit-for-bit.
 
-## What this is
+## What it is
 
-This repository contains:
+- **`src/bitnet.mind`**: a BitNet-style forward pass in pure MIND. Weights
+  are ternary `{-1, 0, +1}`, packed 2 bits each; activations are Q16.16
+  fixed point. BitLinear projections, RMSNorm (exact integer square root),
+  squared-ReLU FFN, residual adds and a ternary LM head are all integer-only,
+  with reductions in fixed ascending order. Every recorded activation vector
+  is folded into a SHA-256 evidence chain whose root the program prints.
+- **`reference/bitnet_ref.py`**: an independent Python oracle that computes
+  the same integers and the same chain with no shared code.
+- **`tools/determinism.py`**: the harness. It compiles the MIND program with
+  `mindc`, runs it, compares its output with the oracle and the pinned root in
+  `results/expected.json`, checks the compiler's evidence artifact, and runs
+  the governance negative control.
+- **`examples/governance/rng_in_kernel.mind`**: a kernel marked
+  `#[deterministic]` that draws from a PRNG; `mindc` must refuse to compile it.
 
-- A **700M-parameter BitNet b1.58 forward pass** written in pure MIND, using
-  ternary weights `{-1, 0, +1}` and Q16.16 fixed-point activations
-- A **cross-architecture determinism harness** that compiles the same `.mind`
-  source for x86_64, ARM64, and CUDA targets, runs each binary against fixed
-  inputs, and verifies that the SHA-256 evidence chain is bit-identical
-- Reference implementations of `BitLinear` projection and ternary arithmetic
-  primitives
+The model is deliberately small and self-contained: hidden size 64, FFN 128,
+2 layers, vocabulary 32, weights generated from a fixed seed by a 31-bit LCG.
+It loads no real BitNet checkpoint. Inputs are single positions, so softmax
+over one position is exactly 1 and attention reduces to `W_o * (W_v * h)`;
+multi-position attention is not implemented.
 
-## What this is for
+## Status
 
-A measurement-study paper concept on **compile-time governance overhead for
-low-latency LLM inference**, comparing:
+| Item | State | Evidence |
+|---|---|---|
+| Ternary x Q16.16 forward pass in MIND | Runs, self-tests pass | `SELFTEST ... PASS` lines, exit code 0 |
+| Output equals independent Python oracle | Verified | `cdylib` check in `tools/determinism.py` |
+| Same evidence-chain root on x86_64 and aarch64 | Verified (aarch64 under QEMU, see below); CI compares native runners | `cross-arch` job in `.github/workflows/ci.yml` |
+| Reproducible, verifiable compiler evidence artifact | Verified | `evidence` check (`mindc --emit-evidence`, `mindc verify`) |
+| `#[deterministic]` refuses a PRNG call at compile time | Verified, with a positive control | `governance` check |
+| Real BitNet b1.58 checkpoint (700M / 2B) | Not implemented | — |
+| Multi-position attention, KV cache | Not implemented | — |
+| CUDA / GPU run | Not measured | — |
+| Governance-overhead measurement (paper H1/H2) | Methodology only | [METHODOLOGY.md](METHODOLOGY.md) |
+| Tensor / pipeline parallel (paper H4) | Research direction, not compilable | [docs/parallel_pipeline.md](docs/parallel_pipeline.md) |
 
-1. Bare BitNet inference (baseline)
-2. BitNet + runtime guardrails (the typical pattern: NeMo Guardrails, Guardrails AI)
-3. BitNet + MIND compile-time invariants (governance baked into the binary)
+Pinned result, reproduced by the oracle on any machine:
 
-The hypothesis: governance overhead is statistically negligible on BitNet
-workloads (vs 5–15% on FP16) because BitNet is memory-bandwidth-bound while
-MIND invariant checks are CPU-bound — disjoint resources.
+```text
+TOKEN t=1 argmax=9 logit=113230
+TOKEN t=7 argmax=23 logit=93688
+TOKEN t=19 argmax=14 logit=126190
+TOKEN t=30 argmax=14 logit=116542
+ROOT cd332f416ba263421b57f8f464f3bd70f479ee32bc39c43d3ead50b6669956cc
+```
 
-The secondary claim: **bit-identical replay across substrates** is achievable
-with ternary × Q16.16, providing the deterministic substrate that current
-FP16 inference cannot.
+Logits are raw Q16.16 integers (113230 / 65536 = 1.7277...).
 
-## Why ternary × Q16.16 is deterministic
+Recorded harness runs (`python3 tools/determinism.py`, all four checks PASS,
+root as above):
 
-Ternary weights `{-1, 0, +1}` collapse multiplication to addition, sign-flip,
-or zero. There is no floating-point rounding, no reduction-order dependence,
-no thermal-state drift. Combined with Q16.16 fixed-point activations
-(integer-only `add`, `sub`, `shift`), the forward pass becomes a pure integer
-computation — bit-identical across CPU, GPU, ARM, and x86.
-
-This is the property that makes auditable, reproducible LLM inference
-structurally possible.
+| Host | Compiler | Notes |
+|---|---|---|
+| x86_64 Linux | published `mindc` v0.10.2 (linux-x64) | mic@3 `trace_hash` `c457cf7e...` |
+| x86_64 Linux | newer `mindc` development build (reports 0.10.2) | `trace_hash` `d6c4124f...`; see [docs/mindc_alignment.md](docs/mindc_alignment.md) |
+| aarch64 Linux, QEMU user-mode emulation (Ubuntu 24.04 container) | published `mindc` v0.10.2 (linux-arm64) + LLVM/MLIR 18 | `trace_hash` `c457cf7e...`, identical to x86_64. Under emulation clang exceeds mindc's fixed 60 s tool timeout at `-O3`, so this run forwarded clang at `-O0`; the root is unchanged. The CI arm64 job uses the normal `-O3` pipeline on a native runner. |
 
 ## Quick start
+
+Requirements: Linux (x86_64 or aarch64), Python 3.12 or newer, a C toolchain
+(`cc`, `ld`, `as`, `objcopy`; `build-essential` on Debian/Ubuntu), and
+`mindc` 0.10.x. On aarch64 the published `mindc` also calls `mlir-opt`,
+`mlir-translate` and `clang` (Ubuntu 24.04: `mlir-18-tools llvm-18 clang-18`,
+with `/usr/lib/llvm-18/bin` on `PATH`).
 
 ```bash
 git clone https://github.com/star-ga/bitnet-mind-governance
 cd bitnet-mind-governance
+python3 -m pip install -r requirements.txt
 
-# Install Python dependencies for the harness
-pip install -r requirements.txt
+# 1. Reference oracle only (no compiler needed)
+python3 reference/bitnet_ref.py
 
-# Run the cross-architecture determinism harness
-cd tests
-python test_determinism.py
+# 2. Install mindc 0.10.2 from the public release (use linux-arm64 on aarch64)
+curl -fsSLO https://github.com/star-ga/mind/releases/download/v0.10.2/mindc-linux-x64.tar.gz
+echo "0c8beb4464f8c7d638a81c2dd8ad5eac81a0ddbc7556be711f00e029d01ef258  mindc-linux-x64.tar.gz" | sha256sum -c -
+mkdir -p .mindc && tar -xzf mindc-linux-x64.tar.gz -C .mindc
+export MINDC="$PWD/.mindc/mindc"
+
+# 3. Full harness and tests
+python3 tools/determinism.py --json-out report.json
+python3 -m pytest -q
 ```
 
-If `mindc` is not installed locally, the harness will simulate the build
-phase and verify the harness logic only. Real cross-arch validation requires
-`mindc >= 0.2.4` (the first release with BitNet support; `0.2.5`
-recommended for the stable `mic@1` IR contract) and target-architecture
-access.
+`tools/determinism.py` exits 0 only when every check passed; without a
+compiler it runs the oracle alone and exits 2, so a missing toolchain never
+reads as a pass. The tests skip (with a printed reason) the checks that need
+`mindc` when it is not found.
+
+To build the program directly:
+
+```bash
+"$MINDC" build --release --emit cdylib --out libbitnet.so
+python3 -c "import ctypes, sys; sys.exit(ctypes.CDLL('./libbitnet.so').main())"
+```
+
+`mindc build --release` (an executable instead of a shared library) also
+works, but needs the MIND CPU runtime library installed; the shared-library
+path above does not.
+
+## How it uses MIND
+
+- **Q16.16 integer arithmetic.** MIND defines integer semantics exactly
+  (wrapping two's complement, defined division and shifts), so the same
+  source gives the same bits on every conforming target. The Python oracle
+  additionally checks that no intermediate leaves the signed 64-bit range.
+- **`#[deterministic]` call-graph check.** Every function in
+  `src/bitnet.mind` except `main` (which prints) carries `#[deterministic]`.
+  The type checker rejects such a function when it calls one of the
+  compiler's known nondeterministic builtins, such as an unseeded PRNG draw.
+  `examples/governance/rng_in_kernel.mind` is the negative control: it is
+  refused with `determinism::nondeterministic_in_deterministic`, and the
+  harness confirms that the same file without the annotation does not raise
+  that diagnostic. The check has limits in the published 0.10.2 release
+  (it does not follow every indirect call); see
+  [docs/mindc_alignment.md](docs/mindc_alignment.md).
+- **mic@3 evidence artifacts.** `mindc src/bitnet.mind --emit-evidence a.mic3`
+  writes the canonical IR with an embedded evidence chain. The harness emits
+  it twice, requires the two files to be byte-identical, and requires
+  `mindc verify --require-deterministic --require-strict-fp` to accept it.
+- **Standard library.** SHA-256 comes from MIND's `std.sha256`; output goes
+  through `std.io`.
 
 ## Repository structure
 
 ```
 bitnet-mind-governance/
-├── README.md                  (this file)
-├── LICENSE                    (Apache 2.0)
-├── METHODOLOGY.md             (governance overhead measurement protocol)
-├── src/                       (compilable under mindc 0.2.5)
-│   ├── bitnet.mind            (700M BitNet forward pass, pure MIND)
-│   ├── bitlinear.mind         (Q16.16 BitLinear projection)
-│   └── ternary.mind           (ternary weight arithmetic primitives)
-├── examples/                  (research-direction skeletons, not yet compilable)
-│   ├── README.md              (what each skeleton demonstrates)
-│   ├── tensor_parallel_attention.mind  (TP attention shard)
-│   └── pipeline_parallel_forward.mind  (PP 3-stage forward)
-├── tests/
-│   └── test_determinism.py    (cross-architecture hash-parity harness)
+├── Mind.toml                     MIND project manifest (entry: src/bitnet.mind)
+├── src/bitnet.mind               ternary x Q16.16 forward pass + evidence chain
+├── reference/bitnet_ref.py       independent Python oracle
+├── tools/determinism.py          determinism + governance harness
+├── tests/test_determinism.py     pytest suite (oracle known answers + harness checks)
+├── results/expected.json         pinned output lines and evidence-chain root
+├── examples/
+│   ├── governance/rng_in_kernel.mind     must be refused by mindc
+│   ├── tensor_parallel_attention.mind    research skeleton, not compilable
+│   └── pipeline_parallel_forward.mind    research skeleton, not compilable
 ├── docs/
-│   ├── paper_concept.md       (paper outline and methodology)
-│   ├── parallel_pipeline.md   (TP+PP research direction, paper H4)
-│   └── citing.md              (BibTeX for citing this work)
-└── requirements.txt
+│   ├── mindc_alignment.md        toolchain notes for mindc 0.10.x
+│   ├── paper_concept.md          proposed measurement paper
+│   ├── parallel_pipeline.md      TP + PP research direction
+│   └── citing.md                 BibTeX
+├── METHODOLOGY.md                governance-overhead measurement protocol
+├── pyproject.toml                ruff + pytest configuration
+├── assets/logo.svg               project logo
+└── .github/workflows/ci.yml      lint, tests and cross-arch root comparison
 ```
 
-## Distributed execution (research direction)
+## Research context
 
-Production deployment of 70B+ class transformers requires tensor and
-pipeline parallelism (TP+PP) to fit weights across multiple GPUs. The
-existing TP+PP solutions (vLLM, DeepSpeed, NVIDIA Triton) solve memory
-but do not produce deterministic outputs across shards because of
-floating-point reduction-order non-determinism.
-
-The `examples/` directory contains research-direction skeletons for a
-deterministic TP+PP plan emitted by `mindc`, where ternary × Q16.16
-arithmetic plus compile-time-fixed reduction order produces bit-identical
-replay across shards. See `docs/parallel_pipeline.md` for the full
-discussion and engineering scope.
-
-This is the proposed extension that turns the paper from measurement-only
-into measurement + methods.
-
-## Status
-
-- BitNet forward pass in pure MIND: **scaffolded**, 235 lines
-- Cross-architecture determinism harness: **scaffolded**, validation pending
-  on actual cross-arch run
-- Governance overhead measurement: **methodology drafted**, measurement TBD
-- Toolchain: **tested against `mindc 0.2.5`** (current release; native
-  BitNet support landed in `0.2.4`, Pratt parser + stable `mic@1` IR
-  contract added in `0.2.5`, STARGA toolchain)
-
-This is research-stage code intended for academic collaboration. The MIND
-compiler (`mindc`) is STARGA-internal; binaries are reproducible with
-appropriate access.
+The repository supports a proposed measurement study of compile-time
+governance on ternary-weight models: bare inference vs. runtime guardrails
+vs. compile-time invariants, plus cross-substrate bit-identical replay. The
+hypotheses and protocol are in [METHODOLOGY.md](METHODOLOGY.md) and
+[docs/paper_concept.md](docs/paper_concept.md). None of the overhead
+hypotheses has been measured yet; the only measured claims are the ones in
+the Status table above.
 
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
 
-## Citation
+## Links
 
-See [docs/citing.md](docs/citing.md). Once the paper is on arXiv, this section
-will include a citable preprint reference.
-
-## Contact
-
-For research collaboration:
-[STARGA Inc.](https://star.ga) — `ceo@star.ga`
+- MIND language and docs: [mindlang.dev](https://mindlang.dev)
+- MIND compiler (source and releases): [github.com/star-ga/mind](https://github.com/star-ga/mind)
+- Citing this work: [docs/citing.md](docs/citing.md)
+- Contact: [STARGA, Inc.](https://star.ga), `ceo@star.ga`

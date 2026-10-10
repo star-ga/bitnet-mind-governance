@@ -1,90 +1,124 @@
-#!/usr/bin/env python3
-"""
-Cross-Architecture Determinism Harness for BitNet+MIND Governance
+"""Tests for the BitNet + MIND determinism harness.
 
-Compiles a target .mind program (e.g. bitnet.mind) into binaries for
-multiple architectures (x86_64, arm64, cuda), runs them against the
-same input with a fixed seed, and verifies that the cryptographic
-SHA-256 evidence chain emitted at every layer is bit-identical.
-
-This validates the no_float_in_forward_pass Q16.16 compile-time invariant:
-ternary weights {-1, 0, +1} multiplied by Q16.16 fixed-point activations
-are integer-only operations, which means deterministic across substrates.
+The reference tests always run. The compiler tests need `mindc` (from
+$MINDC or PATH) and are skipped, with the reason printed, when it is absent.
+Run:  python3 -m pytest -q tests
 """
 
-import subprocess
+from __future__ import annotations
+
+import hashlib
 import json
 import sys
-import os
+from pathlib import Path
 
-ARCHITECTURES = ["x86_64", "arm64", "cuda"]
-TARGET_MIND = "../src/bitnet.mind"
-PROMPT = "Explain Bell's theorem in two sentences."
-FIXED_SEED = "0xdeadbeefc0ffee"
+import pytest
 
-def build_for_arch(arch):
-    print(f"[*] Compiling for {arch}...")
-    try:
-        subprocess.run(
-            ["mindc", "build", TARGET_MIND, "--target", arch, "-o", f"bitnet_{arch}.elf"],
-            check=True, capture_output=True
-        )
-        print(f"    [+] Compiled bitnet_{arch}.elf")
-    except FileNotFoundError:
-        print(f"    [!] Warning: mindc not found in PATH. Simulating build for {arch}.")
-        with open(f"bitnet_{arch}.elf", "w") as f:
-            f.write("#!/bin/bash\n")
-            f.write(f"echo '{{\"merkle_root\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\", \"arch\": \"{arch}\"}}'\n")
-        os.chmod(f"bitnet_{arch}.elf", 0o755)
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "reference"))
+sys.path.insert(0, str(REPO / "tools"))
 
-def run_binary(arch):
-    print(f"[*] Running inference on {arch}...")
-    cmd = [f"./bitnet_{arch}.elf", "--seed", FIXED_SEED, "--prompt", PROMPT]
+import bitnet_ref as ref  # noqa: E402
+import determinism  # noqa: E402
 
-    if arch == "arm64" and os.uname().machine != "aarch64":
-        print("    (Dispatching via SSH/QEMU to ARM target...)")
+MINDC = determinism.resolve_mindc(None)
+needs_mindc = pytest.mark.skipif(MINDC is None, reason="mindc not found ($MINDC or PATH)")
 
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        return json.loads(result.stdout.strip())
-    except Exception as e:
-        print(f"    [!] Error running {arch}: {e}")
-        return {"merkle_root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
-def main():
-    print("==========================================================")
-    print(" BitNet+MIND - Cross-Arch Bit-Identical Hash Verifier ")
-    print("==========================================================\n")
+# --- Reference kernels (hand-computed known answers) -----------------------
 
-    hashes = {}
 
-    print("--- COMPILATION PHASE ---")
-    for arch in ARCHITECTURES:
-        build_for_arch(arch)
+def test_bitlinear_known_row() -> None:
+    w = ref.Ternary(1, 8, (1, -1, 0, 1, -1, -1, 0, 1))
+    x = [(1 << k) * ref.Q_ONE for k in range(8)]
+    assert ref.bitlinear(w, ref.Q_ONE, x) == [87 * ref.Q_ONE]
 
-    print("\n--- INFERENCE PHASE ---")
-    for arch in ARCHITECTURES:
-        output = run_binary(arch)
-        hashes[arch] = output.get("merkle_root")
-        print(f"    {arch} SHA-256: {hashes[arch]}")
 
-    print("\n--- VERIFICATION PHASE ---")
-    reference_hash = hashes[ARCHITECTURES[0]]
-    all_match = True
-    for arch in ARCHITECTURES[1:]:
-        if hashes[arch] != reference_hash:
-            print(f"    [FAILED] {arch} hash {hashes[arch]} diverges from {ARCHITECTURES[0]} {reference_hash}")
-            all_match = False
-        else:
-            print(f"    [PASSED] {arch} hash is bit-identical to {ARCHITECTURES[0]}")
+def test_bitlinear_scale_is_q16_multiply() -> None:
+    w = ref.Ternary(2, 2, (1, 1, -1, 0))
+    x = [3 * ref.Q_ONE, ref.Q_ONE]
+    # row 0: (3 + 1) * 0.5 = 2.0 ; row 1: -3 * 0.5 = -1.5
+    assert ref.bitlinear(w, ref.Q_ONE // 2, x) == [2 * ref.Q_ONE, -3 * ref.Q_ONE // 2]
 
-    if all_match:
-        print("\n[SUCCESS] Determinism verified across architectures.")
-        print("          The Q16.16 no_float_in_forward_pass invariant holds.")
-        sys.exit(0)
-    else:
-        print("\n[ERROR] Hash mismatch detected. Determinism invariant broken.")
-        sys.exit(1)
 
-if __name__ == "__main__":
-    main()
+def test_rms_norm_of_constant_vector_is_one() -> None:
+    x = [2 * ref.Q_ONE] * 4
+    y = ref.rms_norm(x)
+    assert all(abs(v - ref.Q_ONE) <= 2 for v in y)
+
+
+def test_relu2() -> None:
+    assert ref.relu2(-5 * ref.Q_ONE) == 0
+    assert ref.relu2(0) == 0
+    assert ref.relu2(3 * ref.Q_ONE) == 9 * ref.Q_ONE
+
+
+def test_i64_guard_rejects_overflow() -> None:
+    with pytest.raises(OverflowError):
+        ref._i64(1 << 63)
+
+
+def test_chain_record_layout() -> None:
+    prev = bytes(32)
+    got = ref.chain_record(prev, 2, [1, -1])
+    payload = bytes([2]) + (1).to_bytes(8, "little") + (-1).to_bytes(8, "little", signed=True)
+    assert got == hashlib.sha256(prev + payload).digest()
+
+
+def test_generated_weights_are_ternary() -> None:
+    model = ref.build_model()
+    mats = [model.lm_head] + [m for layer in model.layers for m in vars(layer).values()]
+    for m in mats:
+        assert set(m.weights) <= {-1, 0, 1}
+        assert len(m.weights) == m.rows * m.cols
+
+
+# --- Pinned result ----------------------------------------------------------
+
+
+def test_reference_matches_pinned_root() -> None:
+    expected = json.loads((REPO / "results" / "expected.json").read_text())
+    report = ref.run()
+    assert report.root == expected["root"]
+    assert report.lines() == expected["lines"]
+
+
+def test_root_depends_on_every_token() -> None:
+    """Positive control: changing the input must change the root."""
+    model = ref.build_model()
+    chain_a, chain_b = bytes(32), bytes(32)
+    for t in ref.TOKENS:
+        _, chain_a = ref.forward(model, t, chain_a)
+    for t in (*ref.TOKENS[:-1], ref.TOKENS[-1] - 1):
+        _, chain_b = ref.forward(model, t, chain_b)
+    assert chain_a != chain_b
+
+
+def test_parse_output() -> None:
+    text = "SELFTEST sha256 PASS\nSELFTEST isqrt FAIL\nTOKEN t=1 argmax=2 logit=3\nROOT ab\n"
+    selftests, lines = determinism.parse_output(text)
+    assert selftests == {"sha256": True, "isqrt": False}
+    assert lines == ["TOKEN t=1 argmax=2 logit=3", "ROOT ab"]
+
+
+# --- Compiled MIND program (needs mindc) ------------------------------------
+
+
+@needs_mindc
+def test_compiled_program_matches_reference(tmp_path: Path) -> None:
+    check = determinism.check_cdylib(MINDC, tmp_path, ref.run().lines())
+    assert check.passed, check.detail
+
+
+@needs_mindc
+def test_evidence_artifact_is_reproducible_and_verifies(tmp_path: Path) -> None:
+    check = determinism.check_evidence(MINDC, tmp_path)
+    assert check.passed, check.detail
+    assert check.detail["determinism"] == "deterministic"
+    assert check.detail["fp_mode"] == "strict"
+
+
+@needs_mindc
+def test_nondeterministic_kernel_is_refused(tmp_path: Path) -> None:
+    check = determinism.check_governance(MINDC, tmp_path)
+    assert check.passed, check.detail

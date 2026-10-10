@@ -7,13 +7,16 @@ BitNet under invariant constraints"*
 
 ## One-paragraph abstract (draft)
 
+> Draft wording: the abstract states the hypotheses as if confirmed. None
+> of the overhead results below has been measured yet.
+
 Production deployments of LLMs in regulated domains (medical, legal,
 financial, defense) require governance: guardrails on what the model is
 permitted to emit, audit trails of every decision, and reproducible replay
 across substrates. Current practice bolts governance onto the inference
 loop at runtime, imposing 5–15% latency overhead on standard FP16 stacks.
 We present a measurement study of compile-time governance enforcement on
-BitNet b1.58, a 2.4B-parameter ternary-weight LLM, demonstrating that
+BitNet b1.58 2B4T, a ~2B-parameter ternary-weight LLM, demonstrating that
 governance overhead is statistically negligible (< 1%) on
 bandwidth-bound ternary workloads. We further show that the combination
 of ternary weights and Q16.16 fixed-point activations enables
@@ -65,7 +68,8 @@ substrates may be the natural fit for high-stakes regulated AI.
    - Audit and provenance for ML systems
 
 8. **Limitations**
-   - `mindc` is not open-source (STARGA-internal compiler)
+   - Results are tied to a specific `mindc` release; the harness records
+     the compiler version and CI pins the release archive by sha256
    - BitNet b1.58 is one ternary model class; other quantization schemes
      may behave differently
    - Determinism property depends on Q16.16 precision budget
@@ -98,9 +102,9 @@ cost, not determinism cost, and the paper can report the two separately.
 
 | Item | Owner | Status |
 |---|---|---|
-| Reference BitNet pure-MIND implementation | STARGA | Scaffolded (235 LOC) |
-| Cross-architecture determinism harness | STARGA | Scaffolded |
-| Real cross-arch run (x86 + ARM + CUDA) | TBD | Not yet executed |
+| Reference ternary x Q16.16 forward pass in MIND | STARGA | Runs (small synthetic model, `src/bitnet.mind`); no real checkpoint yet |
+| Cross-architecture determinism harness | STARGA | Runs (`tools/determinism.py`); same root on x86_64 and aarch64 (emulated) |
+| Cross-arch run on a real BitNet checkpoint (x86 + ARM + CUDA) | TBD | Not yet executed |
 | Runtime guardrails wrapper | TBD | Not yet built |
 | Statistical analysis pipeline | TBD | Not yet built |
 | Energy measurement setup | TBD | Hardware-dependent |
@@ -115,7 +119,7 @@ cost, not determinism cost, and the paper can report the two separately.
 
 ## Target venues (in order of fit)
 
-1. MLSys 2026
+1. MLSys
 2. NeurIPS Workshop on Efficient ML
 3. USENIX OSDI
 4. ACM Trustworthy ML workshops

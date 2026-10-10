@@ -1,235 +1,803 @@
-// bitnet_forward.mind — BitNet b1.58 forward pass in pure MIND.
+// src/bitnet.mind — BitNet-style ternary x Q16.16 forward pass in pure MIND.
 //
-// Why this file exists:
+// WHAT THIS IS. A small, fully executable reference of the arithmetic at the
+// heart of BitNet b1.58: ternary weights {-1, 0, +1} applied to Q16.16
+// fixed-point activations. Every product is an integer add, subtract or skip;
+// every scale is one i64 multiply followed by one arithmetic `>> 16`; every
+// reduction runs in ascending index order. Nothing in this file touches a
+// float, a PRNG builtin, the clock or stdin.
 //
-//   BitNet's weights are ternary: {-1, 0, +1}. When multiplied by Q16.16
-//   activations, the operation is purely integer addition/subtraction —
-//   no floating-point math required anywhere in the forward pass.
+// WHAT THIS IS NOT. It is not a 700M or 2B model and loads no real BitNet
+// checkpoint. The weights are generated from a fixed seed by a 31-bit LCG so
+// the run is self-contained. Topology (see constants below):
+//   HIDDEN = 64, FFN = 128, LAYERS = 2, VOCAB = 32, 4 input tokens.
+// Each decoder block is RMSNorm -> attention -> residual -> RMSNorm ->
+// squared-ReLU FFN -> residual. Inputs are single positions, so softmax over
+// one position is exactly 1 and attention reduces to W_o * (W_v * h).
+// Multi-position attention (Q * K^T, causal mask, Q16.16 softmax) is NOT
+// implemented here.
 //
-//   This is the structural reason MindLLM Witness achieves bit-identical
-//   inference across ARM, x86, CUDA, and any future target. IEEE 754
-//   nondeterminism (fused-multiply-add ordering, CUDA atomic reductions,
-//   BF16 rounding variance) simply cannot occur in a Q16.16-only pipeline.
+// EVIDENCE CHAIN. Every recorded activation vector (embedding, each residual,
+// the logits) is folded into a SHA-256 chain:
+//   chain_0 = 32 zero bytes
+//   chain_k = SHA-256(chain_{k-1} || tag byte || values as i64 little-endian)
+// The final chain value is printed as `ROOT <hex>`. reference/bitnet_ref.py
+// recomputes the same chain independently in Python; tests/test_determinism.py
+// asserts the two agree.
 //
-//   Other LLM runtimes cannot reach this property without a language-level
-//   fixed-point primitive. MIND has one. We are the only stack that does.
+// SELF-TESTS. main() first runs known-answer checks (SHA-256 of "abc",
+// integer square root, ternary pack/unpack, a hand-computed BitLinear row,
+// reserved-code detection) and validates that no model matrix holds the
+// reserved 2-bit code. Exit code 0 iff every check passed.
 //
-// Code: Copyright 2026 STARGA, Inc. STARGA Commercial License.
+// Build and run (needs mindc 0.10.x; see README.md, "Quick start"):
+//   mindc build --release --emit cdylib --out libbitnet.so
+//   python3 -c "import ctypes, sys; sys.exit(ctypes.CDLL('./libbitnet.so').main())"
+//
+// Copyright 2026 STARGA, Inc. Licensed under the Apache License, Version 2.0.
 
-[protection]
-module bitnet_forward {
-    use mind.core.hash
-    use mind.core.bytes
-    use mind.tensor.q16_16
-    use evidence_emitter
+import std.io;
+import std.sha256;
 
-    // --- Constants (BitNet b1.58 700M topology) -------------------------
+// --- Topology and fixed-point constants (mirror reference/bitnet_ref.py) ----
 
-    const HIDDEN:           u32 = 1536u32      // d_model
-    const INTERMEDIATE:     u32 = 4096u32      // FFN inner dim
-    const NUM_LAYERS:       u32 = 24u32        // transformer blocks
-    const NUM_HEADS:        u32 = 24u32        // attention heads
-    const HEAD_DIM:         u32 = 64u32        // HIDDEN / NUM_HEADS
-    const VOCAB:            u32 = 32768u32     // SentencePiece tokenizer
-    const MAX_SEQ:          u32 = 4096u32      // context window
+const HIDDEN: i64 = 64
+const FFN: i64 = 128
+const LAYERS: i64 = 2
+const VOCAB: i64 = 32
+const NUM_TOKENS: i64 = 4
 
-    // Q16.16 constants — all math downstream is integer.
-    const Q_ONE:   q16_16 = q16_16::from_int(1i32)
-    const Q_ZERO:  q16_16 = q16_16::from_int(0i32)
-    const Q_SQRT2: q16_16 = q16_16::from_raw(0x00016A0Ai32)  // √2 precomputed
+// 0xDEADBEEFC0FFEE & 0x7FFFFFFF (fixed seed from METHODOLOGY.md).
+const SEED: i64 = 1874919406
 
-    // --- Type: ternary weight matrix -----------------------------------
-    //
-    // Stored as packed int2 (two bits per weight, 4 weights per byte).
-    // Decoded on the fly via branchless table lookup — deterministic,
-    // no floats, no hardware-dependent reordering.
+// 1/sqrt(64)  in Q16.16 (exact)
+const SCALE_D: i64 = 8192
+// 1/sqrt(128) in Q16.16 (rounded)
+const SCALE_F: i64 = 5793
+// RMSNorm epsilon, raw Q16.16 units
+const EPS_RAW: i64 = 1
 
-    type TernaryMatrix {
-        rows:    u32,
-        cols:    u32,
-        packed:  bytes,        // ceil(rows*cols*2 / 8) bytes
-        scale:   q16_16,       // per-tensor scalar s
+const TAG_EMBED: i64 = 1
+const TAG_ATTN: i64 = 2
+const TAG_FFN: i64 = 3
+const TAG_LOGITS: i64 = 4
+
+// ---------------------------------------------------------------------------
+// i64 vector helpers (element k lives at base + 8k)
+// ---------------------------------------------------------------------------
+
+#[deterministic]
+fn qv_get(v: i64, k: i64) -> i64 {
+    __mind_load_i64(v + k * 8)
+}
+
+#[deterministic]
+fn qv_set(v: i64, k: i64, x: i64) -> i64 {
+    __mind_store_i64(v + k * 8, x);
+    0
+}
+
+#[deterministic]
+fn qv_new(n: i64) -> i64 {
+    let v: i64 = __mind_alloc(n * 8);
+    let mut k: i64 = 0;
+    while k < n {
+        qv_set(v, k, 0);
+        k = k + 1;
     }
+    v
+}
 
-    // Decode one ternary weight at (row, col) → {-1, 0, +1} as i8.
-    fn decode_weight(m: &TernaryMatrix, row: u32, col: u32) -> i8 {
-        let idx:   u32 = row * m.cols + col
-        let byte:  u8  = m.packed[(idx >> 2u32) as usize]
-        let shift: u8  = ((idx & 3u32) << 1u32) as u8
-        let code:  u8  = (byte >> shift) & 0x03u8
-        // code: 00=0, 01=+1, 10=-1, 11=reserved (compile-time unreachable)
-        match code {
-            0x00u8 => 0i8,
-            0x01u8 => 1i8,
-            0x02u8 => -1i8,
-            _      => 0i8,     // invariant: compile proves unreachable
+#[deterministic]
+fn qv_copy(src: i64, dst: i64, n: i64) -> i64 {
+    let mut k: i64 = 0;
+    while k < n {
+        qv_set(dst, k, qv_get(src, k));
+        k = k + 1;
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Ternary matrices: 2 bits per weight, 4 weights per byte, row-major.
+//   code 00 = 0, 01 = +1, 10 = -1, 11 = reserved (rejected by validation).
+// Handle layout: [rows | cols | packed byte address], 8 bytes each.
+// ---------------------------------------------------------------------------
+
+#[deterministic]
+fn tern_rows(m: i64) -> i64 {
+    __mind_load_i64(m)
+}
+
+#[deterministic]
+fn tern_cols(m: i64) -> i64 {
+    __mind_load_i64(m + 8)
+}
+
+#[deterministic]
+fn tern_data(m: i64) -> i64 {
+    __mind_load_i64(m + 16)
+}
+
+#[deterministic]
+fn tern_nbytes(m: i64) -> i64 {
+    (tern_rows(m) * tern_cols(m) + 3) / 4
+}
+
+#[deterministic]
+fn tern_new(rows: i64, cols: i64) -> i64 {
+    let m: i64 = __mind_alloc(24);
+    __mind_store_i64(m, rows);
+    __mind_store_i64(m + 8, cols);
+    let nbytes: i64 = (rows * cols + 3) / 4;
+    let data: i64 = __mind_alloc(nbytes);
+    let mut k: i64 = 0;
+    while k < nbytes {
+        __mind_store_i8(data + k, 0);
+        k = k + 1;
+    }
+    __mind_store_i64(m + 16, data);
+    m
+}
+
+// tern_set — OR the 2-bit code for w into a zero-initialised slot.
+#[deterministic]
+fn tern_set(m: i64, idx: i64, w: i64) -> i64 {
+    let mut code: i64 = 0;
+    if w == 1 {
+        code = 1;
+    }
+    if w == 0 - 1 {
+        code = 2;
+    }
+    let addr: i64 = tern_data(m) + (idx >> 2);
+    let shift: i64 = (idx & 3) * 2;
+    let old: i64 = __mind_load_i8(addr) & 255;
+    __mind_store_i8(addr, old | (code << shift));
+    0
+}
+
+#[deterministic]
+fn tern_code(m: i64, idx: i64) -> i64 {
+    let byte: i64 = __mind_load_i8(tern_data(m) + (idx >> 2)) & 255;
+    (byte >> ((idx & 3) * 2)) & 3
+}
+
+// tern_get — decode one weight to {-1, 0, +1}.
+#[deterministic]
+fn tern_get(m: i64, idx: i64) -> i64 {
+    let code: i64 = tern_code(m, idx);
+    if code == 1 {
+        return 1;
+    }
+    if code == 2 {
+        return 0 - 1;
+    }
+    0
+}
+
+// tern_count_reserved — number of slots holding the reserved code 11.
+// A matrix is admissible only when this is 0 (fail-closed validation).
+#[deterministic]
+fn tern_count_reserved(m: i64) -> i64 {
+    let n: i64 = tern_rows(m) * tern_cols(m);
+    let mut bad: i64 = 0;
+    let mut k: i64 = 0;
+    while k < n {
+        if tern_code(m, k) == 3 {
+            bad = bad + 1;
         }
+        k = k + 1;
     }
+    bad
+}
 
-    // --- Ternary × Q16.16 matmul (THE core primitive) ------------------
-    //
-    // For each output row:
-    //   y[i] = scale * Σ_j (w[i,j] ∈ {-1, 0, +1}) · x[j]
-    //        = scale * (Σ_{j: w=+1} x[j] − Σ_{j: w=-1} x[j])
-    //
-    // Pure integer adds and subtracts. Reduction order is lexicographic
-    // (j=0,1,2,...) — NEVER parallel-atomic. That lexicographic order
-    // is the determinism guarantee. Emitted the same on ARM, x86, CUDA
-    // by mindc — the compiler refuses to emit any reduction reorder.
+// ---------------------------------------------------------------------------
+// Deterministic parameter generation (31-bit LCG, state always >= 0)
+// ---------------------------------------------------------------------------
 
-    [invariant reduction_order_lexicographic]
-    fn ternary_matmul(w: &TernaryMatrix, x: &[q16_16]) -> Vec<q16_16> {
-        let out_dim: u32 = w.rows
-        let mut y: Vec<q16_16> = Vec::with_capacity(out_dim as usize)
+#[deterministic]
+fn lcg_next(s: i64) -> i64 {
+    (s * 1103515245 + 12345) & 2147483647
+}
 
-        let mut i: u32 = 0u32
-        while i < out_dim {
-            let mut acc: q16_16 = Q_ZERO
-            let mut j: u32 = 0u32
-            // Lexicographic: j = 0, 1, 2, ...
-            while j < w.cols {
-                let code: i8 = decode_weight(w, i, j)
-                if code == 1i8 {
-                    acc = q16_16::add(acc, x[j as usize])
-                } else if code == -1i8 {
-                    acc = q16_16::sub(acc, x[j as usize])
-                }
-                // code == 0: skip; contributes nothing. Deterministic.
-                j = j + 1u32
+// gen_ternary — state lives in the heap cell at s_cell so it threads through
+// every matrix in a fixed order.
+#[deterministic]
+fn gen_ternary(s_cell: i64, rows: i64, cols: i64) -> i64 {
+    let m: i64 = tern_new(rows, cols);
+    let n: i64 = rows * cols;
+    let mut k: i64 = 0;
+    while k < n {
+        let s: i64 = lcg_next(__mind_load_i64(s_cell));
+        __mind_store_i64(s_cell, s);
+        tern_set(m, k, ((s >> 16) % 3) - 1);
+        k = k + 1;
+    }
+    m
+}
+
+// gen_embedding — VOCAB x HIDDEN table of Q16.16 values in [-1.0, 1.0).
+#[deterministic]
+fn gen_embedding(s_cell: i64) -> i64 {
+    let n: i64 = VOCAB * HIDDEN;
+    let table: i64 = qv_new(n);
+    let mut k: i64 = 0;
+    while k < n {
+        let s: i64 = lcg_next(__mind_load_i64(s_cell));
+        __mind_store_i64(s_cell, s);
+        qv_set(table, k, ((s >> 8) & 131071) - 65536);
+        k = k + 1;
+    }
+    table
+}
+
+// Model handle: [embedding | lm_head | layer table], layer table holds
+// LAYERS x [wv | wo | w_up | w_down] matrix handles.
+#[deterministic]
+fn model_embedding(model: i64) -> i64 {
+    __mind_load_i64(model)
+}
+
+#[deterministic]
+fn model_lm_head(model: i64) -> i64 {
+    __mind_load_i64(model + 8)
+}
+
+#[deterministic]
+fn model_weight(model: i64, layer: i64, which: i64) -> i64 {
+    __mind_load_i64(__mind_load_i64(model + 16) + (layer * 4 + which) * 8)
+}
+
+#[deterministic]
+fn build_model() -> i64 {
+    let s_cell: i64 = __mind_alloc(8);
+    __mind_store_i64(s_cell, SEED);
+    let model: i64 = __mind_alloc(24);
+    __mind_store_i64(model, gen_embedding(s_cell));
+    let table: i64 = __mind_alloc(LAYERS * 4 * 8);
+    let mut l: i64 = 0;
+    while l < LAYERS {
+        __mind_store_i64(table + (l * 4 + 0) * 8, gen_ternary(s_cell, HIDDEN, HIDDEN));
+        __mind_store_i64(table + (l * 4 + 1) * 8, gen_ternary(s_cell, HIDDEN, HIDDEN));
+        __mind_store_i64(table + (l * 4 + 2) * 8, gen_ternary(s_cell, FFN, HIDDEN));
+        __mind_store_i64(table + (l * 4 + 3) * 8, gen_ternary(s_cell, HIDDEN, FFN));
+        l = l + 1;
+    }
+    __mind_store_i64(model + 16, table);
+    __mind_store_i64(model + 8, gen_ternary(s_cell, VOCAB, HIDDEN));
+    __mind_free(s_cell);
+    model
+}
+
+#[deterministic]
+fn model_count_reserved(model: i64) -> i64 {
+    let mut bad: i64 = tern_count_reserved(model_lm_head(model));
+    let mut l: i64 = 0;
+    while l < LAYERS {
+        let mut w: i64 = 0;
+        while w < 4 {
+            bad = bad + tern_count_reserved(model_weight(model, l, w));
+            w = w + 1;
+        }
+        l = l + 1;
+    }
+    bad
+}
+
+// ---------------------------------------------------------------------------
+// Kernels
+// ---------------------------------------------------------------------------
+
+// bitlinear — y[i] = scale * (sum_{w=+1} x[j] - sum_{w=-1} x[j]).
+// The inner reduction runs j = 0, 1, 2, ... and nothing else; that fixed
+// order plus integer-only arithmetic is what makes the result bit-identical.
+#[deterministic]
+fn bitlinear(m: i64, scale: i64, x: i64, y: i64) -> i64 {
+    let rows: i64 = tern_rows(m);
+    let cols: i64 = tern_cols(m);
+    let mut i: i64 = 0;
+    while i < rows {
+        let mut acc: i64 = 0;
+        let mut j: i64 = 0;
+        while j < cols {
+            let w: i64 = tern_get(m, i * cols + j);
+            if w == 1 {
+                acc = acc + qv_get(x, j);
             }
-            y.push(q16_16::mul(acc, w.scale))
-            i = i + 1u32
+            if w == 0 - 1 {
+                acc = acc - qv_get(x, j);
+            }
+            j = j + 1;
         }
-        y
+        qv_set(y, i, (acc * scale) >> 16);
+        i = i + 1;
     }
+    0
+}
 
-    // --- RMSNorm in Q16.16 ---------------------------------------------
-    //
-    // y = x / rms(x) · g     where rms(x) = sqrt(mean(x^2) + eps)
-    //
-    // All operations Q16.16. Square root: Newton-Raphson with fixed
-    // iteration count — deterministic, bit-identical across targets.
-
-    fn rms_norm(x: &[q16_16], gamma: &[q16_16], eps: q16_16) -> Vec<q16_16> {
-        let n: u32 = x.len() as u32
-        let mut sum_sq: q16_16 = Q_ZERO
-        let mut j: u32 = 0u32
-        while j < n {
-            sum_sq = q16_16::add(sum_sq, q16_16::mul(x[j as usize], x[j as usize]))
-            j = j + 1u32
+// isqrt64 — floor(sqrt(v)) by the bit method: exact, no float.
+// sqrt of a Q32.32 value yields Q16.16.
+#[deterministic]
+fn isqrt64(v: i64) -> i64 {
+    if v <= 0 {
+        return 0;
+    }
+    let mut res: i64 = 0;
+    let mut rem: i64 = v;
+    let mut bit: i64 = 4611686018427387904;
+    while bit > rem {
+        bit = bit >> 2;
+    }
+    while bit != 0 {
+        if rem >= res + bit {
+            rem = rem - (res + bit);
+            res = (res >> 1) + bit;
+        } else {
+            res = res >> 1;
         }
-        let mean_sq: q16_16   = q16_16::div(sum_sq, q16_16::from_int(n as i32))
-        let denom:   q16_16   = q16_16::sqrt_nr(q16_16::add(mean_sq, eps), 8u32)
-        let inv:     q16_16   = q16_16::reciprocal_nr(denom, 8u32)
+        bit = bit >> 2;
+    }
+    res
+}
 
-        let mut y: Vec<q16_16> = Vec::with_capacity(n as usize)
-        let mut k: u32 = 0u32
-        while k < n {
-            y.push(q16_16::mul(q16_16::mul(x[k as usize], inv), gamma[k as usize]))
-            k = k + 1u32
+// rms_norm — y = x / sqrt(mean(x^2) + eps), gamma = 1, all Q16.16.
+#[deterministic]
+fn rms_norm(x: i64, n: i64, y: i64) -> i64 {
+    let mut sumsq: i64 = 0;
+    let mut k: i64 = 0;
+    while k < n {
+        let v: i64 = qv_get(x, k);
+        sumsq = sumsq + ((v * v) >> 16);
+        k = k + 1;
+    }
+    let mean: i64 = sumsq / n + EPS_RAW;
+    let rms: i64 = isqrt64(mean << 16);
+    let inv: i64 = 4294967296 / rms;
+    let mut j: i64 = 0;
+    while j < n {
+        qv_set(y, j, (qv_get(x, j) * inv) >> 16);
+        j = j + 1;
+    }
+    0
+}
+
+// relu2_inplace — squared ReLU (the BitNet b1.58 FFN activation).
+#[deterministic]
+fn relu2_inplace(x: i64, n: i64) -> i64 {
+    let mut k: i64 = 0;
+    while k < n {
+        let v: i64 = qv_get(x, k);
+        if v > 0 {
+            qv_set(x, k, (v * v) >> 16)
+        } else {
+            qv_set(x, k, 0)
         }
-        y
+        k = k + 1;
     }
+    0
+}
 
-    // --- Swish / SiLU in Q16.16 (Taylor approx, 10 terms) --------------
-    //
-    // SiLU(x) = x · σ(x) where σ(x) = 1 / (1 + e^(-x))
-    //
-    // For court-admissible determinism, we use a bounded polynomial
-    // approximation on a clamped domain [-6, +6]. The polynomial
-    // coefficients are baked in at compile time; evaluation is
-    // Horner-form integer operations in Q16.16 — bit-identical
-    // everywhere.
-
-    fn silu_q16(x: q16_16) -> q16_16 {
-        let xc: q16_16 = q16_16::clamp(x, q16_16::from_int(-6i32), q16_16::from_int(6i32))
-        // Sigmoid Taylor coefficients precomputed in Q16.16 — see
-        // docs/SIGMOID_APPROX_PROOF.md for bound on max error (<1e-5).
-        let sig: q16_16 = q16_16::sigmoid_approx(xc, 10u32)
-        q16_16::mul(x, sig)
+#[deterministic]
+fn residual_add(x: i64, d: i64, n: i64) -> i64 {
+    let mut k: i64 = 0;
+    while k < n {
+        qv_set(x, k, qv_get(x, k) + qv_get(d, k));
+        k = k + 1;
     }
+    0
+}
 
-    // --- Attention block (single layer) --------------------------------
-    //
-    // Standard multi-head attention: Q = x·W_q, K = x·W_k, V = x·W_v
-    // then softmax(Q·K^T / √d_k) · V. All matmuls are ternary-×-Q16.16.
-    // Softmax is log-sum-exp in Q16.16 — deterministic.
+// ---------------------------------------------------------------------------
+// Evidence chain
+// ---------------------------------------------------------------------------
 
-    struct AttentionWeights {
-        wq: TernaryMatrix,
-        wk: TernaryMatrix,
-        wv: TernaryMatrix,
-        wo: TernaryMatrix,
+// chain_record — chain = SHA-256(chain || tag || values as i64 LE).
+// scratch must hold 33 + 8n bytes.
+#[deterministic]
+fn chain_record(chain: i64, scratch: i64, tag: i64, v: i64, n: i64) -> i64 {
+    let mut k: i64 = 0;
+    while k < 32 {
+        __mind_store_i8(scratch + k, __mind_load_i8(chain + k) & 255);
+        k = k + 1;
     }
-
-    fn attention_layer(x: &[[q16_16]], w: &AttentionWeights) -> Vec<Vec<q16_16>> {
-        // Full implementation omitted for brevity in this scaffold.
-        // See src/attention.mind for the multi-head split, causal mask,
-        // and softmax-Q16.16 log-sum-exp.
-        unimplemented!("see src/attention.mind")
-    }
-
-    // --- Feed-forward block (SwiGLU, Q16.16) ---------------------------
-
-    struct FFNWeights {
-        w_up:   TernaryMatrix,
-        w_gate: TernaryMatrix,
-        w_down: TernaryMatrix,
-    }
-
-    fn ffn_layer(x: &[q16_16], w: &FFNWeights) -> Vec<q16_16> {
-        let up:   Vec<q16_16> = ternary_matmul(&w.w_up,   x)
-        let gate: Vec<q16_16> = ternary_matmul(&w.w_gate, x)
-        // SwiGLU: silu(gate) ⊙ up, then W_down
-        let mut activated: Vec<q16_16> = Vec::with_capacity(up.len())
-        let mut i: u32 = 0u32
-        while (i as usize) < up.len() {
-            let s: q16_16 = silu_q16(gate[i as usize])
-            activated.push(q16_16::mul(s, up[i as usize]))
-            i = i + 1u32
+    __mind_store_i8(scratch + 32, tag);
+    let mut e: i64 = 0;
+    while e < n {
+        let x: i64 = qv_get(v, e);
+        let mut b: i64 = 0;
+        while b < 8 {
+            __mind_store_i8(scratch + 33 + e * 8 + b, (x >> (b * 8)) & 255);
+            b = b + 1;
         }
-        ternary_matmul(&w.w_down, &activated)
+        e = e + 1;
+    }
+    sha256(scratch, 33 + n * 8, chain)
+}
+
+// ---------------------------------------------------------------------------
+// Forward pass for one token. Writes [argmax | logit] into res.
+// ---------------------------------------------------------------------------
+
+#[deterministic]
+fn forward(model: i64, token: i64, chain: i64, scratch: i64, res: i64) -> i64 {
+    let x: i64 = qv_new(HIDDEN);
+    let h: i64 = qv_new(HIDDEN);
+    let t: i64 = qv_new(HIDDEN);
+    let d: i64 = qv_new(HIDDEN);
+    let u: i64 = qv_new(FFN);
+    let logits: i64 = qv_new(VOCAB);
+
+    qv_copy(model_embedding(model) + token * HIDDEN * 8, x, HIDDEN);
+    chain_record(chain, scratch, TAG_EMBED, x, HIDDEN);
+
+    let mut l: i64 = 0;
+    while l < LAYERS {
+        // Attention at sequence length 1: W_o * (W_v * rmsnorm(x)).
+        rms_norm(x, HIDDEN, h);
+        bitlinear(model_weight(model, l, 0), SCALE_D, h, t);
+        bitlinear(model_weight(model, l, 1), SCALE_D, t, d);
+        residual_add(x, d, HIDDEN);
+        chain_record(chain, scratch, TAG_ATTN, x, HIDDEN);
+
+        // FFN: W_down * relu2(W_up * rmsnorm(x)).
+        rms_norm(x, HIDDEN, h);
+        bitlinear(model_weight(model, l, 2), SCALE_D, h, u);
+        relu2_inplace(u, FFN);
+        bitlinear(model_weight(model, l, 3), SCALE_F, u, d);
+        residual_add(x, d, HIDDEN);
+        chain_record(chain, scratch, TAG_FFN, x, HIDDEN);
+        l = l + 1;
     }
 
-    // --- Full forward pass ---------------------------------------------
-    //
-    // Every intermediate activation is SHA-256'd into the evidence chain
-    // (512-mind integration) so court/regulator replay can verify each
-    // internal step independently. This is the "AI Black Box" contract.
+    rms_norm(x, HIDDEN, h);
+    bitlinear(model_lm_head(model), SCALE_D, h, logits);
+    chain_record(chain, scratch, TAG_LOGITS, logits, VOCAB);
 
-    [invariant all_activations_signed]
-    fn forward(tokens: &[u32], weights: &ModelWeights, chain: &mut EvidenceChain) -> Vec<q16_16> {
-        let mut x: Vec<Vec<q16_16>> = embed(tokens, &weights.embedding)
-
-        let mut layer: u32 = 0u32
-        while layer < NUM_LAYERS {
-            let block = &weights.layers[layer as usize]
-
-            // Pre-norm → attention
-            let x_norm: Vec<Vec<q16_16>> = rms_norm_seq(&x, &block.ln_attn, block.eps)
-            chain.record_activation(layer, "pre_attn_norm", &x_norm)
-
-            let attn_out: Vec<Vec<q16_16>> = attention_layer(&x_norm, &block.attn)
-            x = residual_add(&x, &attn_out)
-            chain.record_activation(layer, "post_attn_residual", &x)
-
-            // Pre-norm → FFN
-            let x_norm2: Vec<Vec<q16_16>> = rms_norm_seq(&x, &block.ln_ffn, block.eps)
-            chain.record_activation(layer, "pre_ffn_norm", &x_norm2)
-
-            let ffn_out: Vec<Vec<q16_16>> = ffn_layer_seq(&x_norm2, &block.ffn)
-            x = residual_add(&x, &ffn_out)
-            chain.record_activation(layer, "post_ffn_residual", &x)
-
-            layer = layer + 1u32
+    let mut best: i64 = 0;
+    let mut k: i64 = 1;
+    while k < VOCAB {
+        if qv_get(logits, k) > qv_get(logits, best) {
+            best = k;
         }
-
-        // Final norm + LM head → logits (still Q16.16 at this stage)
-        let last_tok_idx: u32 = (tokens.len() as u32) - 1u32
-        let final_norm: Vec<q16_16> = rms_norm(&x[last_tok_idx as usize], &weights.ln_final, weights.eps)
-        let logits:     Vec<q16_16> = ternary_matmul(&weights.lm_head, &final_norm)
-
-        chain.record_activation(NUM_LAYERS, "logits", &logits)
-        logits
+        k = k + 1;
     }
+    __mind_store_i64(res, best);
+    __mind_store_i64(res + 8, qv_get(logits, best));
+
+    __mind_free(x);
+    __mind_free(h);
+    __mind_free(t);
+    __mind_free(d);
+    __mind_free(u);
+    __mind_free(logits);
+    0
+}
+
+#[deterministic]
+fn token_at(i: i64) -> i64 {
+    if i == 0 {
+        return 1;
+    }
+    if i == 1 {
+        return 7;
+    }
+    if i == 2 {
+        return 19;
+    }
+    30
+}
+
+// ---------------------------------------------------------------------------
+// Known-answer self-tests. Each returns 1 on pass, 0 on fail.
+// ---------------------------------------------------------------------------
+
+// SHA-256("abc") = ba7816bf ... f20015ad (FIPS 180-4 example).
+#[deterministic]
+fn selftest_sha256() -> i64 {
+    let msg: i64 = __mind_alloc(3);
+    let out: i64 = __mind_alloc(32);
+    __mind_store_i8(msg, 97);
+    __mind_store_i8(msg + 1, 98);
+    __mind_store_i8(msg + 2, 99);
+    sha256(msg, 3, out);
+    let mut ok: i64 = 1;
+    if (__mind_load_i8(out) & 255) != 186 {
+        ok = 0;
+    }
+    if (__mind_load_i8(out + 1) & 255) != 120 {
+        ok = 0;
+    }
+    if (__mind_load_i8(out + 2) & 255) != 22 {
+        ok = 0;
+    }
+    if (__mind_load_i8(out + 3) & 255) != 191 {
+        ok = 0;
+    }
+    if (__mind_load_i8(out + 28) & 255) != 242 {
+        ok = 0;
+    }
+    if (__mind_load_i8(out + 29) & 255) != 0 {
+        ok = 0;
+    }
+    if (__mind_load_i8(out + 30) & 255) != 21 {
+        ok = 0;
+    }
+    if (__mind_load_i8(out + 31) & 255) != 173 {
+        ok = 0;
+    }
+    __mind_free(msg);
+    __mind_free(out);
+    ok
+}
+
+// isqrt64(1.0 in Q32.32) = 1.0 in Q16.16; isqrt64(2.0) = floor(sqrt(2) * 65536).
+#[deterministic]
+fn selftest_isqrt() -> i64 {
+    let mut ok: i64 = 1;
+    if isqrt64(4294967296) != 65536 {
+        ok = 0;
+    }
+    if isqrt64(8589934592) != 92681 {
+        ok = 0;
+    }
+    if isqrt64(0) != 0 {
+        ok = 0;
+    }
+    ok
+}
+
+// Weights [+1, -1, 0, +1, -1, -1, 0, +1] round-trip through the packed form,
+// and BitLinear on x = [1, 2, 4, 8, 16, 32, 64, 128] (Q16.16) with scale 1.0
+// gives 1 - 2 + 8 - 16 - 32 + 128 = 87.
+#[deterministic]
+fn selftest_bitlinear() -> i64 {
+    let m: i64 = tern_new(1, 8);
+    let w: i64 = qv_new(8);
+    qv_set(w, 0, 1);
+    qv_set(w, 1, 0 - 1);
+    qv_set(w, 2, 0);
+    qv_set(w, 3, 1);
+    qv_set(w, 4, 0 - 1);
+    qv_set(w, 5, 0 - 1);
+    qv_set(w, 6, 0);
+    qv_set(w, 7, 1);
+    let x: i64 = qv_new(8);
+    let y: i64 = qv_new(1);
+    let mut ok: i64 = 1;
+    let mut k: i64 = 0;
+    while k < 8 {
+        tern_set(m, k, qv_get(w, k));
+        qv_set(x, k, (1 << k) * 65536);
+        k = k + 1;
+    }
+    let mut j: i64 = 0;
+    while j < 8 {
+        if tern_get(m, j) != qv_get(w, j) {
+            ok = 0;
+        }
+        j = j + 1;
+    }
+    if tern_count_reserved(m) != 0 {
+        ok = 0;
+    }
+    bitlinear(m, 65536, x, y);
+    if qv_get(y, 0) != 87 * 65536 {
+        ok = 0;
+    }
+    __mind_free(w);
+    __mind_free(x);
+    __mind_free(y);
+    ok
+}
+
+// A byte of 0xFF holds four reserved codes; validation must count all four.
+#[deterministic]
+fn selftest_reserved() -> i64 {
+    let m: i64 = tern_new(1, 4);
+    __mind_store_i8(tern_data(m), 255);
+    if tern_count_reserved(m) != 4 {
+        return 0;
+    }
+    1
+}
+
+// ---------------------------------------------------------------------------
+// Output: ASCII bytes into one buffer, a single print_bytes at the end.
+// String literals are outside the executable subset, so text is byte codes.
+// ---------------------------------------------------------------------------
+
+#[deterministic]
+fn emit_ch(out: i64, pos: i64, c: i64) -> i64 {
+    __mind_store_i8(out + pos, c);
+    pos + 1
+}
+
+#[deterministic]
+fn emit_dec(out: i64, pos: i64, v: i64) -> i64 {
+    if v < 0 {
+        let p: i64 = emit_ch(out, pos, 45);
+        return emit_dec(out, p, 0 - v);
+    }
+    if v < 10 {
+        return emit_ch(out, pos, 48 + v);
+    }
+    let p: i64 = emit_dec(out, pos, v / 10);
+    emit_ch(out, p, 48 + (v - (v / 10) * 10))
+}
+
+#[deterministic]
+fn emit_nibble(out: i64, pos: i64, v: i64) -> i64 {
+    if v < 10 {
+        return emit_ch(out, pos, 48 + v);
+    }
+    emit_ch(out, pos, 87 + v)
+}
+
+#[deterministic]
+fn emit_hex32(out: i64, pos: i64, buf: i64) -> i64 {
+    let mut p: i64 = pos;
+    let mut k: i64 = 0;
+    while k < 32 {
+        let b: i64 = __mind_load_i8(buf + k) & 255;
+        p = emit_nibble(out, p, b >> 4);
+        p = emit_nibble(out, p, b & 15);
+        k = k + 1;
+    }
+    p
+}
+
+// " PASS" / " FAIL"
+#[deterministic]
+fn emit_status(out: i64, pos: i64, ok: i64) -> i64 {
+    let mut p: i64 = emit_ch(out, pos, 32);
+    if ok == 1 {
+        p = emit_ch(out, p, 80);
+        p = emit_ch(out, p, 65);
+        p = emit_ch(out, p, 83);
+        return emit_ch(out, p, 83);
+    }
+    p = emit_ch(out, p, 70);
+    p = emit_ch(out, p, 65);
+    p = emit_ch(out, p, 73);
+    emit_ch(out, p, 76)
+}
+
+// "SELFTEST <name> PASS|FAIL\n", name given as up to 8 byte codes.
+#[deterministic]
+fn emit_selftest(out: i64, pos: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, ok: i64) -> i64 {
+    // "SELFTEST " = 83 69 76 70 84 69 83 84 32
+    let mut p: i64 = emit_ch(out, pos, 83);
+    p = emit_ch(out, p, 69);
+    p = emit_ch(out, p, 76);
+    p = emit_ch(out, p, 70);
+    p = emit_ch(out, p, 84);
+    p = emit_ch(out, p, 69);
+    p = emit_ch(out, p, 83);
+    p = emit_ch(out, p, 84);
+    p = emit_ch(out, p, 32);
+    p = emit_ch(out, p, a);
+    if b > 0 {
+        p = emit_ch(out, p, b);
+    }
+    if c > 0 {
+        p = emit_ch(out, p, c);
+    }
+    if d > 0 {
+        p = emit_ch(out, p, d);
+    }
+    if e > 0 {
+        p = emit_ch(out, p, e);
+    }
+    if f > 0 {
+        p = emit_ch(out, p, f);
+    }
+    if g > 0 {
+        p = emit_ch(out, p, g);
+    }
+    if h > 0 {
+        p = emit_ch(out, p, h);
+    }
+    p = emit_status(out, p, ok);
+    emit_ch(out, p, 10)
+}
+
+// "TOKEN t=<t> argmax=<a> logit=<v>\n"
+#[deterministic]
+fn emit_token(out: i64, pos: i64, t: i64, a: i64, v: i64) -> i64 {
+    // "TOKEN t=" = 84 79 75 69 78 32 116 61
+    let mut p: i64 = emit_ch(out, pos, 84);
+    p = emit_ch(out, p, 79);
+    p = emit_ch(out, p, 75);
+    p = emit_ch(out, p, 69);
+    p = emit_ch(out, p, 78);
+    p = emit_ch(out, p, 32);
+    p = emit_ch(out, p, 116);
+    p = emit_ch(out, p, 61);
+    p = emit_dec(out, p, t);
+    // " argmax=" = 32 97 114 103 109 97 120 61
+    p = emit_ch(out, p, 32);
+    p = emit_ch(out, p, 97);
+    p = emit_ch(out, p, 114);
+    p = emit_ch(out, p, 103);
+    p = emit_ch(out, p, 109);
+    p = emit_ch(out, p, 97);
+    p = emit_ch(out, p, 120);
+    p = emit_ch(out, p, 61);
+    p = emit_dec(out, p, a);
+    // " logit=" = 32 108 111 103 105 116 61
+    p = emit_ch(out, p, 32);
+    p = emit_ch(out, p, 108);
+    p = emit_ch(out, p, 111);
+    p = emit_ch(out, p, 103);
+    p = emit_ch(out, p, 105);
+    p = emit_ch(out, p, 116);
+    p = emit_ch(out, p, 61);
+    p = emit_dec(out, p, v);
+    emit_ch(out, p, 10)
+}
+
+fn main() -> i64 {
+    let out: i64 = __mind_alloc(4096);
+    let mut pos: i64 = 0;
+
+    // ---- known-answer self-tests ----
+    let ok_sha: i64 = selftest_sha256();
+    // sha256
+    pos = emit_selftest(out, pos, 115, 104, 97, 50, 53, 54, 0, 0, ok_sha);
+    let ok_isqrt: i64 = selftest_isqrt();
+    // isqrt
+    pos = emit_selftest(out, pos, 105, 115, 113, 114, 116, 0, 0, 0, ok_isqrt);
+    let ok_bl: i64 = selftest_bitlinear();
+    // linear
+    pos = emit_selftest(out, pos, 108, 105, 110, 101, 97, 114, 0, 0, ok_bl);
+    let ok_res: i64 = selftest_reserved();
+    // reserved
+    pos = emit_selftest(out, pos, 114, 101, 115, 101, 114, 118, 101, 100, ok_res);
+
+    // ---- build the model and validate it (fail closed on reserved codes) ----
+    let model: i64 = build_model();
+    let mut ok_model: i64 = 0;
+    if model_count_reserved(model) == 0 {
+        ok_model = 1;
+    }
+    // model
+    pos = emit_selftest(out, pos, 109, 111, 100, 101, 108, 0, 0, 0, ok_model);
+
+    // ---- forward pass over the fixed tokens, folding the evidence chain ----
+    let chain: i64 = __mind_alloc(32);
+    let mut z: i64 = 0;
+    while z < 32 {
+        __mind_store_i8(chain + z, 0);
+        z = z + 1;
+    }
+    let scratch: i64 = __mind_alloc(33 + HIDDEN * 8 + VOCAB * 8);
+    let res: i64 = __mind_alloc(16);
+    let mut i: i64 = 0;
+    while i < NUM_TOKENS {
+        let t: i64 = token_at(i);
+        forward(model, t, chain, scratch, res);
+        pos = emit_token(out, pos, t, __mind_load_i64(res), __mind_load_i64(res + 8));
+        i = i + 1;
+    }
+
+    // "ROOT " = 82 79 79 84 32
+    pos = emit_ch(out, pos, 82);
+    pos = emit_ch(out, pos, 79);
+    pos = emit_ch(out, pos, 79);
+    pos = emit_ch(out, pos, 84);
+    pos = emit_ch(out, pos, 32);
+    pos = emit_hex32(out, pos, chain);
+    pos = emit_ch(out, pos, 10);
+
+    let n: i64 = print_bytes(out, pos);
+    __mind_free(out);
+
+    if ok_sha + ok_isqrt + ok_bl + ok_res + ok_model != 5 {
+        return 1;
+    }
+    if n < 0 {
+        return 1;
+    }
+    0
 }

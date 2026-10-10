@@ -1,0 +1,21 @@
+// examples/governance/rng_in_kernel.mind — a program mindc must REFUSE.
+//
+// `scaled_sum` carries `#[deterministic]`, the same annotation every kernel
+// in src/bitnet.mind carries, but it draws from an unseeded PRNG. mindc
+// rejects it at compile time with the diagnostic
+// `determinism::nondeterministic_in_deterministic`, and no artifact is
+// written. tools/determinism.py asserts the refusal, and also compiles a copy
+// with the annotation removed to confirm that this specific diagnostic comes
+// from the annotation and not from anything else in the file.
+//
+// Copyright 2026 STARGA, Inc. Licensed under the Apache License, Version 2.0.
+
+#[deterministic]
+fn scaled_sum(a: i64, b: i64) -> i64 {
+    let jitter: i64 = rand_int();
+    ((a + b) * 65536 + jitter) >> 16
+}
+
+fn main() -> i64 {
+    scaled_sum(1, 2)
+}

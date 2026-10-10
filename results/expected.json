@@ -1,0 +1,11 @@
+{
+  "description": "Evidence-chain root and output lines of src/bitnet.mind, as computed by reference/bitnet_ref.py. Any conforming mindc build must print exactly these lines.",
+  "root": "cd332f416ba263421b57f8f464f3bd70f479ee32bc39c43d3ead50b6669956cc",
+  "lines": [
+    "TOKEN t=1 argmax=9 logit=113230",
+    "TOKEN t=7 argmax=23 logit=93688",
+    "TOKEN t=19 argmax=14 logit=126190",
+    "TOKEN t=30 argmax=14 logit=116542",
+    "ROOT cd332f416ba263421b57f8f464f3bd70f479ee32bc39c43d3ead50b6669956cc"
+  ]
+}

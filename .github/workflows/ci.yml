@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MINDC_VERSION: v0.10.2
+  # sha256 of the published release archives, pinned here so a replaced
+  # download cannot pass silently.
+  MINDC_SHA256_X64: 0c8beb4464f8c7d638a81c2dd8ad5eac81a0ddbc7556be711f00e029d01ef258
+  MINDC_SHA256_ARM64: 570dd43866963f1a21ed63d555f91740c7d1706a678e3a392eb69c9dc80c0657
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - run: pip install -r requirements.txt
+      - run: ruff check .
+      - run: ruff format --check .
+
+  determinism:
+    name: determinism (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - run: pip install -r requirements.txt
+      - name: Install LLVM/MLIR 18 tools (the aarch64 mindc build calls mlir-opt)
+        if: matrix.arch == 'arm64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mlir-18-tools llvm-18 clang-18
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+      - name: Install mindc ${{ env.MINDC_VERSION }} (linux-${{ matrix.arch }})
+        run: |
+          set -euo pipefail
+          archive="mindc-linux-${{ matrix.arch }}.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/star-ga/mind/releases/download/${MINDC_VERSION}/${archive}"
+          if [ "${{ matrix.arch }}" = "x64" ]; then want="$MINDC_SHA256_X64"; else want="$MINDC_SHA256_ARM64"; fi
+          echo "${want}  ${archive}" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/mindc"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/mindc"
+          echo "MINDC=$RUNNER_TEMP/mindc/mindc" >> "$GITHUB_ENV"
+      - name: mindc version
+        run: '"$MINDC" --version'
+      - name: Tests (reference + compiled program)
+        run: python -m pytest -q
+      - name: Determinism report
+        run: python tools/determinism.py --json-out "report-${{ matrix.arch }}.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: report-${{ matrix.arch }}
+          path: report-${{ matrix.arch }}.json
+
+  cross-arch:
+    needs: determinism
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: report-*
+          merge-multiple: true
+      - name: Compare evidence-chain roots across architectures
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          reports = {a: json.load(open(f"report-{a}.json")) for a in ("x64", "arm64")}
+          for arch, r in reports.items():
+              print(arch, r["host"]["machine"], r["root"], "ok" if r["ok"] else "FAILED")
+          roots = {r["root"] for r in reports.values()}
+          ok = all(r["ok"] for r in reports.values()) and len(roots) == 1
+          sys.exit(0 if ok else 1)
+          PY
