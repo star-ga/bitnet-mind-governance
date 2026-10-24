@@ -8,6 +8,8 @@ A small, runnable reference for **deterministic ternary-weight inference with
 compile-time governance**, written in [MIND](https://mindlang.dev), plus the
 harness that checks it bit-for-bit.
 
+Governance integration: MIND-Law — STARGA's implementation of the 512 constraint by J. M. Watson.
+
 ## What it is
 
 - **`src/bitnet.mind`**: a BitNet-style forward pass in pure MIND. Weights
