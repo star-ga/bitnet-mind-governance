@@ -172,6 +172,12 @@ hypotheses and protocol are in [METHODOLOGY.md](METHODOLOGY.md) and
 hypotheses has been measured yet; the only measured claims are the ones in
 the Status table above.
 
+## Community
+
+- **Discussions:** <https://github.com/star-ga/mind/discussions> — questions,
+  ideas and help for bitnet-mind-governance and the wider MIND ecosystem.
+- **Discord:** <https://mindlang.dev/discord> — the MindLang community server.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
