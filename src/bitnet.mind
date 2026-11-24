@@ -31,7 +31,7 @@
 // reserved 2-bit code. Exit code 0 iff every check passed.
 //
 // Build and run (needs mindc 0.10.x; see README.md, "Quick start"):
-//   mindc build --release --emit cdylib --out libbitnet.so
+//   mindc build --backend mlir --release --emit cdylib --out libbitnet.so
 //   python3 -c "import ctypes, sys; sys.exit(ctypes.CDLL('./libbitnet.so').main())"
 //
 // Copyright 2026 STARGA, Inc. Licensed under the Apache License, Version 2.0.
