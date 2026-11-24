@@ -28,13 +28,14 @@ written as byte codes.
 
 | Command | Needs | Notes |
 |---|---|---|
-| `mindc build --release --emit cdylib --out libbitnet.so` | `cc`, `ld`, `as`, `objcopy` | used by the harness and CI |
+| `mindc build --backend mlir --release --emit cdylib --out libbitnet.so` | `cc`, `ld`, `as`, `objcopy` | used by the harness and CI |
 | `mindc build --release` | MIND CPU runtime library | produces an executable |
 | `mindc src/bitnet.mind --emit-evidence a.mic3` | nothing extra | mic@3 artifact for `mindc verify` |
 
-The pure-MIND native ELF backend (`mindc build --backend native`) does not
-yet lower the heap intrinsics this program uses, so the harness uses the
-default backend.
+The pure-MIND native ELF backend (`mindc build --backend native`) refuses
+`--emit cdylib` and does not yet lower the heap intrinsics this program uses,
+so the harness and the direct build select the MLIR backend explicitly
+(`--backend mlir`).
 
 ## Known limits of the `#[deterministic]` check (observed with 0.10.2)
 

@@ -129,7 +129,7 @@ def check_cdylib(mindc: str, work: Path, ref_lines: list[str]) -> Check:
     proj = stage_project(work / "cdylib")
     lib = work / "libbitnet_mind_governance.so"
     build = run(
-        [mindc, "build", "--release", "--no-cache", "--emit", "cdylib", "--out", str(lib)],
+        [mindc, "build", "--backend", "mlir", "--release", "--no-cache", "--emit", "cdylib", "--out", str(lib)],
         cwd=proj,
     )
     if build.returncode != 0 or not lib.is_file():

@@ -106,7 +106,7 @@ reads as a pass. The tests skip (with a printed reason) the checks that need
 To build the program directly:
 
 ```bash
-"$MINDC" build --release --emit cdylib --out libbitnet.so
+"$MINDC" build --backend mlir --release --emit cdylib --out libbitnet.so
 python3 -c "import ctypes, sys; sys.exit(ctypes.CDLL('./libbitnet.so').main())"
 ```
 
