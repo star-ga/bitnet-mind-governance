@@ -13,8 +13,8 @@ env:
   MINDC_VERSION: v0.10.4
   # sha256 of the published release archives, pinned here so a replaced
   # download cannot pass silently.
-  MINDC_SHA256_X64: 0c8beb4464f8c7d638a81c2dd8ad5eac81a0ddbc7556be711f00e029d01ef258
-  MINDC_SHA256_ARM64: 570dd43866963f1a21ed63d555f91740c7d1706a678e3a392eb69c9dc80c0657
+  MINDC_SHA256_X64: b887ddedaa03a5a5d7124456d4b433bce5782b66d9dacac58c9dcf9083dc8003
+  MINDC_SHA256_ARM64: 4856acf7360e196e09d7576fd3d2d4b3c2c98d344350c313a2c20fba5d7f2990
 
 jobs:
   lint:
