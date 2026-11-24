@@ -1,6 +1,6 @@
 # Toolchain notes: mindc 0.10.x
 
-This repository targets **mindc 0.10.x**. CI pins the public `v0.10.2`
+This repository targets **mindc 0.10.x**. CI pins the public `v0.10.4`
 release archives from <https://github.com/star-ga/mind/releases> by sha256.
 
 ## What changed from the earlier 0.2.x-era sources

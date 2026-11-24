@@ -5,5 +5,5 @@ pytest==9.1.1
 ruff==0.17.0
 
 # The MIND compiler is not pip-installable. Use mindc 0.10.x: the public
-# release archives at https://github.com/star-ga/mind/releases (v0.10.2 is
+# release archives at https://github.com/star-ga/mind/releases (v0.10.4 is
 # what CI pins), or a build from source. See README.md, "Quick start".

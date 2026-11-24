@@ -87,9 +87,9 @@ python3 -m pip install -r requirements.txt
 # 1. Reference oracle only (no compiler needed)
 python3 reference/bitnet_ref.py
 
-# 2. Install mindc 0.10.2 from the public release (use linux-arm64 on aarch64)
-curl -fsSLO https://github.com/star-ga/mind/releases/download/v0.10.2/mindc-linux-x64.tar.gz
-echo "0c8beb4464f8c7d638a81c2dd8ad5eac81a0ddbc7556be711f00e029d01ef258  mindc-linux-x64.tar.gz" | sha256sum -c -
+# 2. Install mindc 0.10.4 from the public release (use linux-arm64 on aarch64)
+curl -fsSLO https://github.com/star-ga/mind/releases/download/v0.10.4/mindc-linux-x64.tar.gz
+echo "b887ddedaa03a5a5d7124456d4b433bce5782b66d9dacac58c9dcf9083dc8003  mindc-linux-x64.tar.gz" | sha256sum -c -
 mkdir -p .mindc && tar -xzf mindc-linux-x64.tar.gz -C .mindc
 export MINDC="$PWD/.mindc/mindc"
 

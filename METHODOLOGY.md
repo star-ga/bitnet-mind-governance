@@ -108,7 +108,7 @@ For each configuration and hardware target, run:
 | HuggingFace BitNet implementation may have framework overhead | Compare to a hand-rolled reference if discrepancy > 2% |
 | Runtime guardrails not optimized for BitNet | Use multiple runtime systems (NeMo + Guardrails AI), report worst-case to be fair |
 | Energy meter accuracy varies across hardware | Report all three (NVML, RAPL, external) where available |
-| Results could differ between `mindc` releases | Pin the compiler release archive by sha256 (CI pins v0.10.2) and record the version in every report |
+| Results could differ between `mindc` releases | Pin the compiler release archive by sha256 (CI pins v0.10.4) and record the version in every report |
 | Determinism claim depends on Q16.16 precision | Document precision budget, verify against reference HF output |
 
 ## Expected outcomes
