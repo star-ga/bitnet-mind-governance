@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  MINDC_VERSION: v0.10.2
+  MINDC_VERSION: v0.10.4
   # sha256 of the published release archives, pinned here so a replaced
   # download cannot pass silently.
   MINDC_SHA256_X64: 0c8beb4464f8c7d638a81c2dd8ad5eac81a0ddbc7556be711f00e029d01ef258
